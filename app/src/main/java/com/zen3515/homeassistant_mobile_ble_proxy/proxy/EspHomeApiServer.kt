@@ -58,6 +58,9 @@ class EspHomeApiServer(
             }
         },
         onError = onError,
+        onInfo = { message ->
+            log("GATT info: $message")
+        },
     )
 
     @Volatile

@@ -3,8 +3,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-val defaultVersionCode = 100
-val defaultVersionName = "1.0"
+val defaultVersionCode = 200
+val defaultVersionName = "2.0"
 val releaseVersionCode = providers.gradleProperty("releaseVersionCode")
     .orNull
     ?.toIntOrNull()

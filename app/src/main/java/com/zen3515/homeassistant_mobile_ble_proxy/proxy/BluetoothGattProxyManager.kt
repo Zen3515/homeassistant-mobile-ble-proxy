@@ -29,6 +29,7 @@ class BluetoothGattProxyManager(
     private val maxConnections: Int = DEFAULT_MAX_CONNECTIONS,
     private val onEvent: (Event) -> Unit,
     private val onError: (String) -> Unit,
+    private val onInfo: (String) -> Unit = {},
 ) {
     sealed interface Event {
         data class DeviceConnection(
@@ -173,6 +174,11 @@ class BluetoothGattProxyManager(
         var mtu: Int,
     ) {
         var servicesLoaded: Boolean = false
+        var serviceRefreshRequired: Boolean = false
+        var rediscoverServicesWhenIdle: Boolean = false
+        var discardNextServiceDiscoveryResult: Boolean = false
+        var emitServicesAfterDiscovery: Boolean = false
+        var emitPairingSuccessAfterDiscovery: Boolean = false
         var nextDescriptorHandle: Int = SYNTHETIC_DESCRIPTOR_HANDLE_BASE
         val services: MutableList<EspHomeProtoCodec.GattService> = mutableListOf()
         val characteristicsByHandle: MutableMap<Int, BluetoothGattCharacteristic> = mutableMapOf()
@@ -243,12 +249,14 @@ class BluetoothGattProxyManager(
                 return@runOnMain
             }
 
-            if (connection.servicesLoaded) {
+            if (connection.servicesLoaded && !connection.serviceRefreshRequired) {
+                connection.emitServicesAfterDiscovery = false
                 emitServices(connection)
                 return@runOnMain
             }
 
-            enqueueOperation(connection, PendingOperation.DiscoverServices)
+            connection.emitServicesAfterDiscovery = true
+            requestServiceDiscovery(connection, "get_services request")
         }
     }
 
@@ -260,7 +268,7 @@ class BluetoothGattProxyManager(
                 return@runOnMain
             }
 
-            if (!ensureServiceCache(connection)) {
+            if (!ensureServiceCache(connection, request.handle)) {
                 return@runOnMain
             }
             val characteristic = connection.characteristicsByHandle[request.handle]
@@ -281,7 +289,7 @@ class BluetoothGattProxyManager(
                 return@runOnMain
             }
 
-            if (!ensureServiceCache(connection)) {
+            if (!ensureServiceCache(connection, request.handle)) {
                 return@runOnMain
             }
             val characteristic = connection.characteristicsByHandle[request.handle]
@@ -310,7 +318,7 @@ class BluetoothGattProxyManager(
                 return@runOnMain
             }
 
-            if (!ensureServiceCache(connection)) {
+            if (!ensureServiceCache(connection, request.handle)) {
                 return@runOnMain
             }
             val descriptor = connection.descriptorsByHandle[request.handle]
@@ -331,7 +339,7 @@ class BluetoothGattProxyManager(
                 return@runOnMain
             }
 
-            if (!ensureServiceCache(connection)) {
+            if (!ensureServiceCache(connection, request.handle)) {
                 return@runOnMain
             }
             val descriptor = connection.descriptorsByHandle[request.handle]
@@ -359,7 +367,7 @@ class BluetoothGattProxyManager(
                 return@runOnMain
             }
 
-            if (!ensureServiceCache(connection)) {
+            if (!ensureServiceCache(connection, request.handle)) {
                 return@runOnMain
             }
             val characteristic = connection.characteristicsByHandle[request.handle]
@@ -373,6 +381,12 @@ class BluetoothGattProxyManager(
                 emit(Event.GattError(address = request.address, handle = request.handle, error = ERROR_INVALID_HANDLE))
                 return@runOnMain
             }
+
+            logInfo(
+                "GATT notify request for ${connection.macAddress}: " +
+                    "handle=${request.handle}, uuid=${characteristic.uuid}, enable=${request.enable}, " +
+                    "properties=${describeCharacteristicProperties(characteristic.properties)}, cccd=${clientConfigDescriptor.uuid}",
+            )
 
             enqueueOperation(
                 connection,
@@ -412,7 +426,17 @@ class BluetoothGattProxyManager(
         }
 
         if (bondState == BluetoothDevice.BOND_BONDED) {
-            emit(Event.DevicePairing(address = address, paired = true, error = 0))
+            val connection = connections[address]
+            if (connection != null &&
+                connection.state == ConnectionState.CONNECTED &&
+                (!connection.servicesLoaded || connection.serviceRefreshRequired)
+            ) {
+                connection.emitPairingSuccessAfterDiscovery = true
+                logInfo("GATT pair request for ${connection.macAddress}: already bonded, ensuring services are loaded")
+                requestServiceDiscovery(connection, "pair request on bonded connection")
+            } else {
+                emit(Event.DevicePairing(address = address, paired = true, error = 0))
+            }
             return
         }
 
@@ -634,6 +658,10 @@ class BluetoothGattProxyManager(
         onEvent(event)
     }
 
+    private fun logInfo(message: String) {
+        onInfo(message)
+    }
+
     private fun emitConnectionsChanged() {
         val allocated = allocatedSnapshot
         emit(
@@ -649,19 +677,26 @@ class BluetoothGattProxyManager(
         allocatedSnapshot = connections.keys.toList()
     }
 
-    private fun ensureServiceCache(connection: Connection): Boolean {
-        if (connection.servicesLoaded) {
+    private fun ensureServiceCache(connection: Connection, requestHandle: Int): Boolean {
+        if (connection.servicesLoaded && !connection.serviceRefreshRequired) {
             return true
         }
 
+        if (connection.serviceRefreshRequired) {
+            emit(Event.GattError(address = connection.address, handle = requestHandle, error = ERROR_BUSY))
+            logInfo("GATT operation waiting for post-pair service refresh on ${connection.macAddress}")
+            return false
+        }
+
         val services = getGattServicesOrNull(connection) ?: run {
-            emit(Event.GattError(address = connection.address, handle = 0, error = ERROR_PERMISSION_DENIED))
+            emit(Event.GattError(address = connection.address, handle = requestHandle, error = ERROR_PERMISSION_DENIED))
             return false
         }
 
         if (services.isNotEmpty()) {
             rebuildServiceCache(connection, services)
             connection.servicesLoaded = true
+            logDiscoveredServices(connection, services, "platform cache")
         }
         return true
     }
@@ -683,6 +718,30 @@ class BluetoothGattProxyManager(
 
     private fun enqueueOperation(connection: Connection, operation: PendingOperation) {
         connection.pendingOperations.addLast(operation)
+        pumpOperationQueue(connection)
+    }
+
+    private fun requestServiceDiscovery(connection: Connection, reason: String) {
+        if (connection.state != ConnectionState.CONNECTED) {
+            return
+        }
+
+        val inFlight = connection.inFlightOperation
+        if (inFlight is PendingOperation.DiscoverServices) {
+            if (connection.discardNextServiceDiscoveryResult) {
+                connection.rediscoverServicesWhenIdle = true
+            }
+            logInfo("GATT service discovery already in progress for ${connection.macAddress}; reusing it for $reason")
+            return
+        }
+
+        if (connection.pendingOperations.any { it is PendingOperation.DiscoverServices }) {
+            logInfo("GATT service discovery already queued for ${connection.macAddress}; reusing it for $reason")
+            return
+        }
+
+        connection.pendingOperations.addFirst(PendingOperation.DiscoverServices)
+        logInfo("GATT service discovery queued for ${connection.macAddress}: $reason")
         pumpOperationQueue(connection)
     }
 
@@ -734,22 +793,33 @@ class BluetoothGattProxyManager(
                 }
 
                 is PendingOperation.Notify -> {
+                    val cccdValue = when {
+                        operation.enable && characteristicSupportsIndication(operation.characteristic) ->
+                            BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                        operation.enable -> BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        else -> BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                    }
+                    val notifyMode = when {
+                        cccdValue.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE) -> "indication"
+                        operation.enable -> "notification"
+                        else -> "disable"
+                    }
+                    logInfo(
+                        "GATT ${if (operation.enable) "enable" else "disable"} notify start for ${connection.macAddress}: " +
+                            "handle=${operation.handle}, uuid=${operation.characteristic.uuid}, mode=$notifyMode",
+                    )
                     val subscribed = connection.gatt.setCharacteristicNotification(
                         operation.characteristic,
                         operation.enable,
                     )
                     if (!subscribed) {
+                        logInfo("GATT setCharacteristicNotification returned false for ${connection.macAddress}: handle=${operation.handle}")
                         false
                     } else {
-                        val value = if (operation.enable) {
-                            BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                        } else {
-                            BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
-                        }
                         writeDescriptorCompat(
                             gatt = connection.gatt,
                             descriptor = operation.clientConfigDescriptor,
-                            data = value,
+                            data = cccdValue,
                         )
                     }
                 }
@@ -776,12 +846,28 @@ class BluetoothGattProxyManager(
 
     private fun completeOperation(connection: Connection) {
         connection.inFlightOperation = null
+        if (connection.rediscoverServicesWhenIdle && connection.pendingOperations.none { it is PendingOperation.DiscoverServices }) {
+            connection.rediscoverServicesWhenIdle = false
+            connection.pendingOperations.addFirst(PendingOperation.DiscoverServices)
+            logInfo("GATT queued follow-up post-bond service discovery for ${connection.macAddress}")
+        }
         pumpOperationQueue(connection)
     }
 
     private fun failOperation(connection: Connection, handle: Int, error: Int) {
+        val failedOperation = connection.inFlightOperation
         connection.inFlightOperation = null
+        if (failedOperation is PendingOperation.DiscoverServices && connection.emitPairingSuccessAfterDiscovery) {
+            connection.emitPairingSuccessAfterDiscovery = false
+            emit(Event.DevicePairing(address = connection.address, paired = false, error = error))
+            logInfo("GATT pair follow-up discovery failed for ${connection.macAddress}: error=$error")
+        }
         emit(Event.GattError(connection.address, handle, error))
+        if (connection.rediscoverServicesWhenIdle && connection.pendingOperations.none { it is PendingOperation.DiscoverServices }) {
+            connection.rediscoverServicesWhenIdle = false
+            connection.pendingOperations.addFirst(PendingOperation.DiscoverServices)
+            logInfo("GATT retried post-bond service discovery for ${connection.macAddress} after discovery failure")
+        }
         pumpOperationQueue(connection)
     }
 
@@ -878,15 +964,47 @@ class BluetoothGattProxyManager(
         connection.inFlightOperation = null
         connection.pendingOperations.clear()
 
+        if (connection.emitPairingSuccessAfterDiscovery) {
+            connection.emitPairingSuccessAfterDiscovery = false
+            emit(Event.DevicePairing(address = connection.address, paired = false, error = error))
+        }
+
         emit(Event.DeviceConnection(address = connection.address, connected = false, mtu = 0, error = error))
         emitConnectionsChanged()
     }
 
-    private fun rebuildServiceCache(connection: Connection, services: List<BluetoothGattService>) {
+    private fun clearServiceCache(connection: Connection) {
+        connection.servicesLoaded = false
         connection.services.clear()
         connection.characteristicsByHandle.clear()
         connection.descriptorsByHandle.clear()
         connection.nextDescriptorHandle = SYNTHETIC_DESCRIPTOR_HANDLE_BASE
+    }
+
+    private fun preparePostBondServiceRefresh(connection: Connection, reason: String) {
+        val queuedCount = connection.pendingOperations.size
+        if (queuedCount > 0) {
+            connection.pendingOperations.clear()
+            logInfo("GATT dropped $queuedCount queued operation(s) for ${connection.macAddress} after bond completion")
+        }
+
+        connection.serviceRefreshRequired = true
+        connection.discardNextServiceDiscoveryResult = false
+        clearServiceCache(connection)
+
+        if (connection.inFlightOperation is PendingOperation.DiscoverServices) {
+            connection.discardNextServiceDiscoveryResult = true
+            connection.rediscoverServicesWhenIdle = true
+            logInfo("GATT bond completed for ${connection.macAddress}; waiting for in-flight discovery to finish before authenticated rediscovery")
+            return
+        }
+
+        logInfo("GATT bond completed for ${connection.macAddress}; requesting authenticated service rediscovery")
+        requestServiceDiscovery(connection, reason)
+    }
+
+    private fun rebuildServiceCache(connection: Connection, services: List<BluetoothGattService>) {
+        clearServiceCache(connection)
 
         for (service in services) {
             val characteristics = service.characteristics.map { characteristic ->
@@ -930,13 +1048,16 @@ class BluetoothGattProxyManager(
 
                     if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                         connection.state = ConnectionState.CONNECTED
-                        emit(Event.DeviceConnection(address = address, connected = true, mtu = connection.mtu, error = 0))
+                        logInfo("GATT connected to ${connection.macAddress}; requesting MTU $REQUESTED_MTU")
+                        emit(Event.DeviceConnection(address = connection.address, connected = true, mtu = connection.mtu, error = 0))
                         if (!hasConnectPermission()) {
                             closeConnection(connection, ERROR_PERMISSION_DENIED)
                             return@runOnMain
                         }
                         try {
-                            gatt.requestMtu(REQUESTED_MTU)
+                            if (!gatt.requestMtu(REQUESTED_MTU)) {
+                                logInfo("GATT MTU request returned false for ${connection.macAddress}; continuing with default MTU ${connection.mtu}")
+                            }
                         } catch (securityException: SecurityException) {
                             onError("MTU request permission denied for ${connection.macAddress}: ${securityException.message}")
                             closeConnection(connection, ERROR_PERMISSION_DENIED)
@@ -946,6 +1067,7 @@ class BluetoothGattProxyManager(
 
                     if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                         val error = if (status == BluetoothGatt.GATT_SUCCESS) 0 else status
+                        logInfo("GATT disconnected from ${connection.macAddress}: status=$status error=$error")
                         closeConnection(connection, error)
                         return@runOnMain
                     }
@@ -964,7 +1086,7 @@ class BluetoothGattProxyManager(
                     }
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         connection.mtu = mtu
-                        emit(Event.DeviceConnection(address = address, connected = true, mtu = mtu, error = 0))
+                        logInfo("GATT MTU changed for ${connection.macAddress}: mtu=$mtu")
                     }
                 }
             }
@@ -990,9 +1112,25 @@ class BluetoothGattProxyManager(
                         failOperation(connection, 0, ERROR_PERMISSION_DENIED)
                         return@runOnMain
                     }
+                    if (connection.discardNextServiceDiscoveryResult) {
+                        connection.discardNextServiceDiscoveryResult = false
+                        logInfo("GATT discarded pre-bond discovery result for ${connection.macAddress}")
+                        completeOperation(connection)
+                        return@runOnMain
+                    }
                     rebuildServiceCache(connection, services)
                     connection.servicesLoaded = true
-                    emitServices(connection)
+                    connection.serviceRefreshRequired = false
+                    logDiscoveredServices(connection, services, "discoverServices()")
+                    if (connection.emitPairingSuccessAfterDiscovery) {
+                        connection.emitPairingSuccessAfterDiscovery = false
+                        emit(Event.DevicePairing(address = address, paired = true, error = 0))
+                        logInfo("GATT services ready after pair for ${connection.macAddress}")
+                    }
+                    if (connection.emitServicesAfterDiscovery) {
+                        connection.emitServicesAfterDiscovery = false
+                        emitServices(connection)
+                    }
                     completeOperation(connection)
                 }
             }
@@ -1079,9 +1217,14 @@ class BluetoothGattProxyManager(
 
                         is PendingOperation.Notify -> {
                             if (status == BluetoothGatt.GATT_SUCCESS) {
+                                logInfo("GATT notify descriptor write complete for ${connection.macAddress}: handle=${inFlight.handle}")
                                 emit(Event.GattNotify(address = address, handle = inFlight.handle))
                                 completeOperation(connection)
                             } else {
+                                logInfo(
+                                    "GATT notify descriptor write failed for ${connection.macAddress}: " +
+                                        "handle=${inFlight.handle}, status=$status",
+                                )
                                 failOperation(connection, inFlight.handle, status)
                             }
                         }
@@ -1178,6 +1321,7 @@ class BluetoothGattProxyManager(
                             data = value.copyOf(),
                         )
                     )
+                    logInfo("GATT notify data for ${connection.macAddress}: handle=${characteristic.instanceId}, bytes=${value.size}")
                 }
             }
         }
@@ -1233,7 +1377,14 @@ class BluetoothGattProxyManager(
                 if (bondState == BluetoothDevice.BOND_BONDED) {
                     pendingBondActions.remove(address)
                     clearBondTimeout(address)
-                    emit(Event.DevicePairing(address = address, paired = true, error = 0))
+                    val connection = connections[address]
+                    if (connection != null && connection.state == ConnectionState.CONNECTED) {
+                        connection.emitPairingSuccessAfterDiscovery = true
+                        logInfo("GATT bond state changed for ${connection.macAddress}: ${bondStateLabel(previousBondState)} -> ${bondStateLabel(bondState)}")
+                        preparePostBondServiceRefresh(connection, "bond completed")
+                    } else {
+                        emit(Event.DevicePairing(address = address, paired = true, error = 0))
+                    }
                 } else if (bondState == BluetoothDevice.BOND_NONE && previousBondState == BluetoothDevice.BOND_BONDING) {
                     pendingBondActions.remove(address)
                     clearBondTimeout(address)
@@ -1284,6 +1435,47 @@ class BluetoothGattProxyManager(
         }.getOrElse {
             onError("BluetoothGatt.refresh() failed: ${it.message}")
             false
+        }
+    }
+
+    private fun logDiscoveredServices(connection: Connection, services: List<BluetoothGattService>, source: String) {
+        val serviceSummary = if (services.isEmpty()) {
+            "none"
+        } else {
+            services.take(8).joinToString(",") { it.uuid.toString() } +
+                if (services.size > 8) ",..." else ""
+        }
+        val characteristicCount = services.sumOf { it.characteristics.size }
+        logInfo(
+            "GATT services discovered for ${connection.macAddress} via $source: " +
+                "services=${services.size}, characteristics=$characteristicCount, uuids=$serviceSummary",
+        )
+    }
+
+    private fun characteristicSupportsIndication(characteristic: BluetoothGattCharacteristic): Boolean {
+        return characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0
+    }
+
+    private fun describeCharacteristicProperties(properties: Int): String {
+        val flags = buildList {
+            if (properties and BluetoothGattCharacteristic.PROPERTY_BROADCAST != 0) add("broadcast")
+            if (properties and BluetoothGattCharacteristic.PROPERTY_READ != 0) add("read")
+            if (properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0) add("write_no_rsp")
+            if (properties and BluetoothGattCharacteristic.PROPERTY_WRITE != 0) add("write")
+            if (properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0) add("notify")
+            if (properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0) add("indicate")
+            if (properties and BluetoothGattCharacteristic.PROPERTY_SIGNED_WRITE != 0) add("signed_write")
+            if (properties and BluetoothGattCharacteristic.PROPERTY_EXTENDED_PROPS != 0) add("extended")
+        }
+        return if (flags.isEmpty()) "none" else flags.joinToString("|")
+    }
+
+    private fun bondStateLabel(state: Int): String {
+        return when (state) {
+            BluetoothDevice.BOND_NONE -> "none"
+            BluetoothDevice.BOND_BONDING -> "bonding"
+            BluetoothDevice.BOND_BONDED -> "bonded"
+            else -> state.toString()
         }
     }
 
