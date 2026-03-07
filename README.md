@@ -162,9 +162,20 @@ The repository includes a tag-driven GitHub Actions workflow.
 
 Current behavior:
 
-- The workflow publishes the release APK produced by Gradle.
-- If you do not add your own signing step and secrets, the uploaded APK will be unsigned.
-- That is acceptable for source-distribution / F-Droid-oriented workflows, but not for direct end-user sideloading.
+- The workflow expects Android signing secrets and produces a signed installable release APK.
+
+Required GitHub Actions repository secrets:
+
+- `ANDROID_RELEASE_KEYSTORE_BASE64`
+- `ANDROID_RELEASE_STORE_PASSWORD`
+- `ANDROID_RELEASE_KEY_ALIAS`
+- `ANDROID_RELEASE_KEY_PASSWORD`
+
+Generate the base64 keystore payload with:
+
+```bash
+base64 -w 0 android-release.jks > android-release.jks.base64
+```
 
 ## Project Status
 
