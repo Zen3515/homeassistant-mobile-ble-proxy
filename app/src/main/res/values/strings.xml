@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">HA Mobile BLE Proxy</string>
+    <string name="proxy_notification_channel_name">BLE Proxy Service</string>
+    <string name="proxy_notification_channel_description">Keeps the ESPHome Bluetooth proxy running in the background</string>
+    <string name="proxy_notification_title">ESPHome BLE Proxy Active</string>
+    <string name="stop_proxy">Stop</string>
+</resources>
