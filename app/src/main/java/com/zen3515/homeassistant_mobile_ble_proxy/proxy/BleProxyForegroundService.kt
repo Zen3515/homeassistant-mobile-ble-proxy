@@ -144,6 +144,7 @@ class BleProxyForegroundService : Service() {
                 "filters=${if (enabledFilterCount == 0) "allow-all" else "$enabledFilterCount"}, " +
                 "lock_targets=${currentSettings.lockScreenScanTargets.size}, " +
                 "auto_add=${if (currentSettings.autoAddMatchedDevicesToLockScreenTargets) "on" else "off"}, " +
+                "gatt_notify_log=${if (currentSettings.verboseGattNotifyDataLogging) "verbose" else "normal"}, " +
                 "encryption=${if (currentSettings.espHomeApiEncryptionKey.isBlank()) "off" else "on"}",
         )
 
@@ -187,6 +188,11 @@ class BleProxyForegroundService : Service() {
                 settings = currentSettings,
                 macAddress = macAddress,
                 scannerEngine = scannerEngine!!,
+                isVerboseGattNotifyDataLoggingEnabled = {
+                    synchronized(settingsMutationLock) {
+                        currentSettings.verboseGattNotifyDataLogging
+                    }
+                },
                 onAdvertisementMatchedFilters = { advertisement ->
                     handleMatchedAdvertisementForLockScreenTargets(advertisement)
                 },

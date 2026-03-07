@@ -33,6 +33,7 @@ data class ProxySettings(
     val apiPort: Int = 6053,
     val bluetoothMacOverride: String = "",
     val espHomeApiEncryptionKey: String = "",
+    val verboseGattNotifyDataLogging: Boolean = false,
     val autoStartOnBoot: Boolean = false,
     val scannerMode: ScannerMode = ScannerMode.PASSIVE,
     val advertisementFlushIntervalMs: Int = 100,

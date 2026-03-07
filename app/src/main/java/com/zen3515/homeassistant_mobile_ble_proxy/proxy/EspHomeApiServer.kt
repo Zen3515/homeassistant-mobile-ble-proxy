@@ -24,6 +24,7 @@ class EspHomeApiServer(
     private val settings: ProxySettings,
     private val macAddress: String,
     private val scannerEngine: BluetoothScanEngine,
+    private val isVerboseGattNotifyDataLoggingEnabled: () -> Boolean = { false },
     private val onAdvertisementMatchedFilters: (RawAdvertisement) -> Unit = {},
     private val onError: (String) -> Unit,
     private val onLog: (String) -> Unit = {},
@@ -59,7 +60,9 @@ class EspHomeApiServer(
         },
         onError = onError,
         onInfo = { message ->
-            log("GATT info: $message")
+            if (!message.startsWith("GATT notify data") || isVerboseGattNotifyDataLoggingEnabled()) {
+                log("GATT info: $message")
+            }
         },
     )
 

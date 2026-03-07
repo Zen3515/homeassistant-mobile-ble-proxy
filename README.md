@@ -39,9 +39,10 @@ It is designed for Home Assistant users who want to run BLE proxying on an Andro
 3. Set battery mode to unrestricted and enable any Xiaomi-specific `Autostart` / `No restrictions` behavior.
 4. Start the proxy from the home screen.
 5. If you want encrypted ESPHome API transport, keep the generated key or replace it with your own 32-byte base64 key.
-6. Add the device in Home Assistant through the ESPHome integration.
-7. If you use WireGuard or another VPN, set mDNS interface mode to `VPN` so discovery is advertised on that transport.
-8. If you need reliable scanning while the screen is locked:
+6. If your BLE device requires a PIN or passkey, pair it on the Android phone first and complete the system pairing dialog there. The proxy reuses Android's stored bond on reconnect.
+7. Add the device in Home Assistant through the ESPHome integration.
+8. If you use WireGuard or another VPN, set mDNS interface mode to `VPN` so discovery is advertised on that transport.
+9. If you need reliable scanning while the screen is locked:
    Create one or more advertisement filters.
    Enable `Auto-add matched devices` or manually add exact lock-screen targets.
    Let the app see the devices while the screen is on.
@@ -100,6 +101,10 @@ There is no Home Assistant URL or Home Assistant API token in the normal flow. H
   Base64-encoded 32-byte key for ESPHome Noise transport.
   Empty value means plaintext API transport.
 
+- `Verbose GATT packet logs`:
+  Keeps normal GATT state logs enabled while optionally adding per-packet notify data lines to the runtime log.
+  Default is `off` because it gets noisy quickly.
+
 - `mDNS advertise interface`:
   Controls which transport NSD/mDNS registration should prefer.
   `VPN` is useful when you want discovery on WireGuard instead of local Wi-Fi.
@@ -113,6 +118,7 @@ There is no Home Assistant URL or Home Assistant API token in the normal flow. H
 - Screen-off scanning is intentionally target-based. Save exact devices if you expect the proxy to keep seeing them while locked.
 - For Xiaomi devices, battery restrictions are often the difference between working and failing background BLE behavior.
 - Pair, unpair, and clear-cache behavior depends on Android OEM BLE stack behavior.
+- For Bluetooth devices that require a PIN or passkey, do the initial pairing on the phone first. After Android stores the bond, the proxy can usually reconnect without asking again.
 
 ## Screenshots
 

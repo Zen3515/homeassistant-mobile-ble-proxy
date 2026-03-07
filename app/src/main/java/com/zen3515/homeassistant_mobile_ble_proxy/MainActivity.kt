@@ -534,6 +534,17 @@ private fun HomeScreen(
                             "Auto-add matched devices: off"
                         },
                     )
+                    Text(
+                        if (uiState.settings.verboseGattNotifyDataLogging) {
+                            "Verbose GATT packet logs: on"
+                        } else {
+                            "Verbose GATT packet logs: off"
+                        },
+                    )
+                    Text(
+                        "PIN/passkey BLE devices: pair once on the phone first, then use the proxy.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
 
                     Button(
                         onClick = onOpenSettings,
@@ -865,6 +876,22 @@ private fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        Text("Verbose GATT packet logs")
+                        Switch(
+                            checked = draftSettings.verboseGattNotifyDataLogging,
+                            onCheckedChange = { enabled ->
+                                onDraftSettingsChange(
+                                    draftSettings.copy(verboseGattNotifyDataLogging = enabled),
+                                )
+                            },
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Text("Scanner mode")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
@@ -1109,6 +1136,18 @@ private fun SettingsScreen(
                         } else {
                             "Auto-add matched devices is disabled."
                         },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        text = if (draftSettings.verboseGattNotifyDataLogging) {
+                            "Verbose GATT packet logs are enabled. Every incoming GATT notify packet is written to the runtime log for protocol debugging."
+                        } else {
+                            "Verbose GATT packet logs are disabled. GATT state changes stay visible, but per-packet notify data is hidden."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        text = "Bluetooth PIN/passkey devices: complete the first pairing on the phone first. After Android stores the bond, Home Assistant can use the proxy without asking every reconnect.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
