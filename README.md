@@ -116,19 +116,12 @@ There is no Home Assistant URL or Home Assistant API token in the normal flow. H
 
 ## Screenshots
 
-Add screenshots to `docs/screenshots/` using these filenames:
-
-- `docs/screenshots/home.png`
-- `docs/screenshots/settings.png`
-- `docs/screenshots/filters.png`
-- `docs/screenshots/lock-screen-targets.png`
-
-Suggested README image slots:
-
-- Home screen and runtime log
-- Settings page
-- Advertisement filters page
-- Lock-screen scan targets page
+![home-2](https://github.com/user-attachments/assets/99c78bca-ed2b-403e-9414-6885be5fc779)
+![home-1](https://github.com/user-attachments/assets/e2958a42-77da-4189-9a54-74df290732f9)
+![setting-2](https://github.com/user-attachments/assets/5b655ca0-168e-4487-9a55-5f5b22b2b147)
+![setting-1](https://github.com/user-attachments/assets/3cdcd84e-dd7c-4768-97b1-80f61ccbb920)
+![filter-1](https://github.com/user-attachments/assets/af25f9fe-4f77-4657-9d35-440102067935)
+![lock-scan-1](https://github.com/user-attachments/assets/e612c5ef-b538-4e4f-9a6e-1144e0436792)
 
 ## Local Build
 
