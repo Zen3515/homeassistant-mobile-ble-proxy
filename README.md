@@ -29,7 +29,7 @@ It is designed for Home Assistant users who want to run BLE proxying on an Andro
   The app keeps running through a foreground service, persistent notification, and partial wake lock. This is suitable for normal proxy use while another app is open.
 
 - Screen off / device locked:
-  The app switches to targeted Android `ScanFilter` entries built from the saved `Lock-Screen Scan Targets` list.
+  The app switches to targeted Android `ScanFilter` entries built from the saved `Managed Target Devices` list if Lock-Screen Scanning is enabled for them.
   This is important because broad unfiltered scans are not reliable on locked devices on stock Android and Xiaomi firmware.
 
 - Lock-screen target learning:
@@ -47,7 +47,7 @@ It is designed for Home Assistant users who want to run BLE proxying on an Andro
 8. If you use WireGuard or another VPN, set mDNS interface mode to `VPN` so discovery is advertised on that transport.
 9. If you need reliable scanning while the screen is locked:
    Create one or more advertisement filters.
-   Enable `Auto-add matched devices` or manually add exact lock-screen targets.
+   Enable `Auto-add matched devices` or manually add exact managed target devices with Lock-Screen Scanning enabled.
    Let the app see the devices while the screen is on.
    Lock the phone after those targets are saved.
 
@@ -89,11 +89,13 @@ There is no Home Assistant URL or Home Assistant API token in the normal flow. H
   Regex-based rules applied with OR logic.
   If no enabled filters exist, the app forwards all advertisements.
 
-- `Lock-Screen Scan Targets`:
-  Exact MAC addresses and/or exact device names used to build Android hardware scan filters when the screen is off.
+- `Managed Target Devices`:
+  A consolidated list of exact MAC addresses and/or exact device names. These determine behavior based on two toggles:
+  - **Lock-Screen Scanning**: Used to build Android hardware scan filters when the screen is off.
+  - **Auto-Pair Device**: Forces the Android OS to immediately prompt for Bluetooth pairing/bonding natively upon connection, preventing GATT cache drops on strict BLE devices.
 
 - `Auto-add matched devices`:
-  When enabled, advertisements that match at least one enabled advertisement filter can add an exact lock-screen target automatically.
+  When enabled, advertisements that match at least one enabled advertisement filter can add an exact managed target device automatically.
   If no enabled advertisement filters exist, this feature stays idle and adds nothing.
 
 - `Bluetooth MAC address`:
@@ -118,10 +120,10 @@ There is no Home Assistant URL or Home Assistant API token in the normal flow. H
 ## Normal Operating Notes
 
 - Screen-on broad discovery works without a saved target list.
-- Screen-off scanning is intentionally target-based. Save exact devices if you expect the proxy to keep seeing them while locked.
+- Screen-off scanning is intentionally target-based. Save exact devices via `Managed Target Devices` if you expect the proxy to keep seeing them while locked.
 - For Xiaomi devices, battery restrictions are often the difference between working and failing background BLE behavior.
 - Pair, unpair, and clear-cache behavior depends on Android OEM BLE stack behavior.
-- For Bluetooth devices that require a PIN or passkey, do the initial pairing on the phone first. After Android stores the bond, the proxy can usually reconnect without asking again.
+- For strict Bluetooth devices (like certain motorcycle stacks) that require a PIN or passkey, you can enable `Auto-Pair Device` in the target list so the proxy triggers an OS-level pairing prompt natively before Home Assistant drops the connection. After Android stores the bond, the proxy safely avoids redundant discoveries.
 
 ## Screenshots
 
@@ -196,8 +198,8 @@ Implemented:
 - BLE pair, unpair, and clear-cache requests
 - mDNS interface selection
 - Runtime log viewer and copy support
-- Lock-screen target management and auto-learning
+- Managed Target Devices configuration for lock-screen scanning and immediate auto-pairing
 
 Known practical limitation:
 
-- Broad BLE discovery while the device is locked is not reliable on stock Android. Use exact lock-screen scan targets for locked scanning.
+- Broad BLE discovery while the device is locked is not reliable on stock Android. Use exact Lock-Screen Scanning toggles for locked scanning.
