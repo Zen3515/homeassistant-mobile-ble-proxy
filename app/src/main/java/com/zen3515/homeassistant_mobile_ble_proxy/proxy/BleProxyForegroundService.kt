@@ -142,7 +142,7 @@ class BleProxyForegroundService : Service() {
                 "low_rate_checks=${currentSettings.scannerLowRateConsecutiveChecks}, " +
                 "nsd=${currentSettings.nsdInterfaceMode.name.lowercase()}, " +
                 "filters=${if (enabledFilterCount == 0) "allow-all" else "$enabledFilterCount"}, " +
-                "lock_targets=${currentSettings.lockScreenScanTargets.size}, " +
+                "lock_targets=${currentSettings.managedTargetDevices.size}, " +
                 "auto_add=${if (currentSettings.autoAddMatchedDevicesToLockScreenTargets) "on" else "off"}, " +
                 "gatt_notify_log=${if (currentSettings.verboseGattNotifyDataLogging) "verbose" else "normal"}, " +
                 "encryption=${if (currentSettings.espHomeApiEncryptionKey.isBlank()) "off" else "on"}",
@@ -150,7 +150,7 @@ class BleProxyForegroundService : Service() {
 
         scannerEngine = BluetoothScanEngine(
             context = applicationContext,
-            lockScreenScanTargets = currentSettings.lockScreenScanTargets,
+            managedTargetDevices = currentSettings.managedTargetDevices,
             onAdvertisement = { advertisement ->
                 apiServer?.publishAdvertisement(advertisement)
             },
@@ -280,10 +280,10 @@ class BleProxyForegroundService : Service() {
                 }
 
                 val scanner = scannerEngine
-                scanner?.updateLockScreenScanTargets(updatedSettings.lockScreenScanTargets)
+                scanner?.updateManagedTargetDevices(updatedSettings.managedTargetDevices)
 
-                val previousTargetFilters = previousSettings.lockScreenScanTargets
-                val currentTargetFilters = updatedSettings.lockScreenScanTargets
+                val previousTargetFilters = previousSettings.managedTargetDevices
+                val currentTargetFilters = updatedSettings.managedTargetDevices
                 val targetsChanged = previousTargetFilters != currentTargetFilters
                 if (targetsChanged && !isScreenInteractive()) {
                     val restarted = scanner?.restartForEnvironmentChange() ?: false
@@ -340,7 +340,7 @@ class BleProxyForegroundService : Service() {
                         acquireWakeLockIfNeeded()
                         logRuntime("Screen turned off; ensured partial WakeLock is held")
                         val scanner = scannerEngine ?: return
-                        if (scanner.hasPlatformEligibleLockScreenTargets()) {
+                        if (scanner.hasPlatformEligibleManagedTargetDevices()) {
                             val restarted = scanner.restartForEnvironmentChange()
                             if (restarted) {
                                 logRuntime("Restarted scanner to apply lock-screen scan targets")
@@ -352,7 +352,7 @@ class BleProxyForegroundService : Service() {
                     Intent.ACTION_SCREEN_ON -> {
                         logRuntime("Screen turned on")
                         val scanner = scannerEngine ?: return
-                        if (scanner.hasPlatformEligibleLockScreenTargets()) {
+                        if (scanner.hasPlatformEligibleManagedTargetDevices()) {
                             val restarted = scanner.restartForEnvironmentChange()
                             if (restarted) {
                                 logRuntime("Restarted scanner to resume broad foreground scanning")
@@ -404,7 +404,7 @@ class BleProxyForegroundService : Service() {
             }
 
             val normalizedMac = ProxyIdentity.longToMac(advertisement.address)
-            val alreadyTracked = snapshot.lockScreenScanTargets.any { existing ->
+            val alreadyTracked = snapshot.managedTargetDevices.any { existing ->
                 ProxyIdentity.normalizeMacAddress(existing.macAddress) == normalizedMac
             }
             if (alreadyTracked) {
@@ -412,7 +412,7 @@ class BleProxyForegroundService : Service() {
             }
 
             val updated = snapshot.copy(
-                lockScreenScanTargets = snapshot.lockScreenScanTargets + LockScreenScanTarget(
+                managedTargetDevices = snapshot.managedTargetDevices + ManagedTargetDevice(
                     id = UUID.randomUUID().toString(),
                     macAddress = normalizedMac,
                     name = advertisement.name.orEmpty().trim(),
@@ -422,7 +422,7 @@ class BleProxyForegroundService : Service() {
             updated
         } ?: return
 
-        scannerEngine?.updateLockScreenScanTargets(updatedSettings.lockScreenScanTargets)
+        scannerEngine?.updateManagedTargetDevices(updatedSettings.managedTargetDevices)
         logRuntime(
             "Added lock-screen scan target from matched advertisement: " +
                 ProxyIdentity.longToMac(advertisement.address) +

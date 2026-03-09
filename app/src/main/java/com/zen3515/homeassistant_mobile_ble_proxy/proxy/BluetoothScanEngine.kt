@@ -54,7 +54,7 @@ data class RawAdvertisement(
 
 class BluetoothScanEngine(
     private val context: Context,
-    lockScreenScanTargets: List<LockScreenScanTarget>,
+    managedTargetDevices: List<ManagedTargetDevice>,
     private val onAdvertisement: (RawAdvertisement) -> Unit,
     private val onStateChanged: (RuntimeScannerState) -> Unit,
     private val onError: (String) -> Unit,
@@ -67,7 +67,7 @@ class BluetoothScanEngine(
         get() = bluetoothManager.adapter
 
     private val retryLock = Any()
-    private val lockScreenScanTargetsLock = Any()
+    private val managedTargetDevicesLock = Any()
 
     @Volatile
     private var scanner: BluetoothLeScanner? = null
@@ -85,7 +85,7 @@ class BluetoothScanEngine(
     private var currentMode: ScannerMode = ScannerMode.PASSIVE
     @Volatile
     private var lastFilterDescription: String = "broad"
-    private var lockScreenScanTargets: List<LockScreenScanTarget> = lockScreenScanTargets
+    private var managedTargetDevices: List<ManagedTargetDevice> = managedTargetDevices
 
     private val callback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
@@ -136,14 +136,14 @@ class BluetoothScanEngine(
         }
     }
 
-    fun updateLockScreenScanTargets(targets: List<LockScreenScanTarget>) {
-        synchronized(lockScreenScanTargetsLock) {
-            lockScreenScanTargets = targets
+    fun updateManagedTargetDevices(targets: List<ManagedTargetDevice>) {
+        synchronized(managedTargetDevicesLock) {
+            managedTargetDevices = targets
         }
     }
 
-    fun hasPlatformEligibleLockScreenTargets(): Boolean {
-        return buildPlatformScanFilters(currentLockScreenScanTargets()).isNotEmpty()
+    fun hasPlatformEligibleManagedTargetDevices(): Boolean {
+        return buildPlatformScanFilters(currentManagedTargetDevices()).isNotEmpty()
     }
 
     fun restartForEnvironmentChange(): Boolean {
@@ -205,7 +205,7 @@ class BluetoothScanEngine(
         val platformScanFilters = if (interactive) {
             emptyList()
         } else {
-            buildPlatformScanFilters(currentLockScreenScanTargets())
+            buildPlatformScanFilters(currentManagedTargetDevices())
         }
         val filters = platformScanFilters.ifEmpty { null }
 
@@ -227,9 +227,9 @@ class BluetoothScanEngine(
             if (interactive) {
                 onLog("BLE scan using broad discovery because the screen is on")
             } else if (filters == null) {
-                onLog("BLE scan has no platform-eligible lock-screen target; Android may stop it when the screen turns off")
+                onLog("BLE scan has no platform-eligible managed target; Android may stop it when the screen turns off")
             } else {
-                onLog("BLE scan using ${filters.size} lock-screen platform filter(s)")
+                onLog("BLE scan using ${filters.size} managed target platform filter(s)")
             }
             localScanner.startScan(filters, settings, callback)
             onLog("BLE scan started with callback delivery")
@@ -360,16 +360,18 @@ class BluetoothScanEngine(
             .build()
     }
 
-    private fun currentLockScreenScanTargets(): List<LockScreenScanTarget> {
-        return synchronized(lockScreenScanTargetsLock) { lockScreenScanTargets }
+    private fun currentManagedTargetDevices(): List<ManagedTargetDevice> {
+        return synchronized(managedTargetDevicesLock) { managedTargetDevices }
     }
 
-    private fun buildPlatformScanFilters(targets: List<LockScreenScanTarget>): List<ScanFilter> {
+    private fun buildPlatformScanFilters(targets: List<ManagedTargetDevice>): List<ScanFilter> {
         if (targets.isEmpty()) {
             return emptyList()
         }
         val filters = mutableListOf<ScanFilter>()
         for (target in targets) {
+            if (!target.enableLockScreenScan) continue
+
             val exactMac = ProxyIdentity.normalizeMacAddress(target.macAddress)
             val exactName = target.name.trim().ifEmpty { null }
             if (exactMac == null && exactName == null) {

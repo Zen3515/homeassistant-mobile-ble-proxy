@@ -66,7 +66,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.AdvertisementFilterRule
-import com.zen3515.homeassistant_mobile_ble_proxy.proxy.LockScreenScanTarget
+import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ManagedTargetDevice
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.MainUiState
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.MainViewModel
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.NsdInterfaceMode
@@ -103,7 +103,7 @@ private enum class ProxyPage {
     HOME,
     SETTINGS,
     ADVERTISEMENT_FILTERS,
-    LOCK_SCREEN_TARGETS,
+    MANAGED_TARGET_DEVICES,
 }
 
 @Composable
@@ -236,7 +236,7 @@ private fun ProxyScreen(
                     lowRateChecksInput = it.filter(Char::isDigit).take(2)
                 },
                 onOpenFilters = { currentPage = ProxyPage.ADVERTISEMENT_FILTERS },
-                onOpenLockScreenTargets = { currentPage = ProxyPage.LOCK_SCREEN_TARGETS },
+                onOpenManagedTargetDevices = { currentPage = ProxyPage.MANAGED_TARGET_DEVICES },
                 onBack = { currentPage = ProxyPage.HOME },
                 onSave = {
                     val parsedPort = apiPortInput.toIntOrNull() ?: settingsDraft.apiPort
@@ -273,16 +273,16 @@ private fun ProxyScreen(
             )
         }
 
-        ProxyPage.LOCK_SCREEN_TARGETS -> {
-            LockScreenTargetsScreen(
+        ProxyPage.MANAGED_TARGET_DEVICES -> {
+            ManagedTargetDevicesScreen(
                 autoAddMatchedDevices = settingsDraft.autoAddMatchedDevicesToLockScreenTargets,
                 advertisementFilters = settingsDraft.advertisementFilters,
-                targets = settingsDraft.lockScreenScanTargets,
+                targets = settingsDraft.managedTargetDevices,
                 onAutoAddMatchedDevicesChange = { enabled ->
                     settingsDraft = settingsDraft.copy(autoAddMatchedDevicesToLockScreenTargets = enabled)
                 },
                 onTargetsChange = { targets ->
-                    settingsDraft = settingsDraft.copy(lockScreenScanTargets = targets)
+                    settingsDraft = settingsDraft.copy(managedTargetDevices = targets)
                 },
                 onBack = { currentPage = ProxyPage.SETTINGS },
             )
@@ -519,12 +519,14 @@ private fun HomeScreen(
                             "Ad filters: $enabledFilterCount enabled (OR matching)"
                         },
                     )
-                    val lockScreenTargetCount = uiState.settings.lockScreenScanTargets.size
+                    val managedTargetCount = uiState.settings.managedTargetDevices.size
+                    val lockScreenTargetCount = uiState.settings.managedTargetDevices.count { it.enableLockScreenScan }
+                    val autoPairCount = uiState.settings.managedTargetDevices.count { it.enableAutoPair }
                     Text(
-                        if (lockScreenTargetCount == 0) {
-                            "Lock-screen scan targets: none"
+                        if (managedTargetCount == 0) {
+                            "Managed target devices: none"
                         } else {
-                            "Lock-screen scan targets: $lockScreenTargetCount"
+                            "Managed target devices: $managedTargetCount ($lockScreenTargetCount lock-screen, $autoPairCount auto-pair)"
                         },
                     )
                     Text(
@@ -578,7 +580,7 @@ private fun SettingsScreen(
     onWatchdogIntervalInputChange: (String) -> Unit,
     onLowRateChecksInputChange: (String) -> Unit,
     onOpenFilters: () -> Unit,
-    onOpenLockScreenTargets: () -> Unit,
+    onOpenManagedTargetDevices: () -> Unit,
     onBack: () -> Unit,
     onSave: () -> Unit,
 ) {
@@ -608,7 +610,7 @@ private fun SettingsScreen(
     val filterRegexValid = draftSettings.advertisementFilters.all {
         isRegexPatternValid(it.macRegex) && isRegexPatternValid(it.nameRegex)
     }
-    val lockScreenTargetsValid = draftSettings.lockScreenScanTargets.all(::isLockScreenScanTargetValid)
+    val managedTargetDevicesValid = draftSettings.managedTargetDevices.all(::isManagedTargetDeviceValid)
 
     val hasChanges = draftSettings != baselineSettings ||
         apiPortInput != baselineSettings.apiPort.toString() ||
@@ -627,7 +629,7 @@ private fun SettingsScreen(
         lowRateChecksValid &&
         encryptionKeyState != NoiseKeyState.INVALID &&
         filterRegexValid &&
-        lockScreenTargetsValid
+        managedTargetDevicesValid
 
     val requestBack = {
         if (hasChanges) {
@@ -811,16 +813,16 @@ private fun SettingsScreen(
                         )
                     }
 
-                    val lockScreenTargetCount = draftSettings.lockScreenScanTargets.size
+                    val managedTargetCount = draftSettings.managedTargetDevices.size
                     Button(
-                        onClick = onOpenLockScreenTargets,
+                        onClick = onOpenManagedTargetDevices,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
-                            if (lockScreenTargetCount == 0) {
-                                "Manage Lock-Screen Scan Targets"
+                            if (managedTargetCount == 0) {
+                                "Manage Target Devices"
                             } else {
-                                "Manage Lock-Screen Scan Targets ($lockScreenTargetCount)"
+                                "Manage Target Devices ($managedTargetCount)"
                             },
                         )
                     }
@@ -1117,14 +1119,16 @@ private fun SettingsScreen(
                             MaterialTheme.colorScheme.error
                         },
                     )
+                    val targetLockScreenCount = draftSettings.managedTargetDevices.count { it.enableLockScreenScan }
+                    val targetAutoPairCount = draftSettings.managedTargetDevices.count { it.enableAutoPair }
                     Text(
-                        text = if (draftSettings.lockScreenScanTargets.isEmpty()) {
-                            "Lock-screen scan targets: none configured. Android may stop broad BLE scanning while locked."
+                        text = if (draftSettings.managedTargetDevices.isEmpty()) {
+                            "Managed target devices: none configured. Android may stop broad BLE scanning while locked. Auto-pairing is disabled."
                         } else {
-                            "Lock-screen scan targets: ${draftSettings.lockScreenScanTargets.size} saved. Exact MAC or exact device name entries are used for screen-off hardware filters."
+                            "Managed target devices: ${draftSettings.managedTargetDevices.size} saved. $targetLockScreenCount for screen-off hardware filters, $targetAutoPairCount for auto-pairing."
                         },
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (lockScreenTargetsValid) {
+                        color = if (managedTargetDevicesValid) {
                             MaterialTheme.colorScheme.onSurface
                         } else {
                             MaterialTheme.colorScheme.error
@@ -1250,12 +1254,12 @@ private fun AdvertisementFiltersScreen(
 }
 
 @Composable
-private fun LockScreenTargetsScreen(
+private fun ManagedTargetDevicesScreen(
     autoAddMatchedDevices: Boolean,
     advertisementFilters: List<AdvertisementFilterRule>,
-    targets: List<LockScreenScanTarget>,
+    targets: List<ManagedTargetDevice>,
     onAutoAddMatchedDevicesChange: (Boolean) -> Unit,
-    onTargetsChange: (List<LockScreenScanTarget>) -> Unit,
+    onTargetsChange: (List<ManagedTargetDevice>) -> Unit,
     onBack: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
@@ -1283,14 +1287,14 @@ private fun LockScreenTargetsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("Lock-Screen Scan Targets", style = MaterialTheme.typography.titleMedium)
+                        Text("Managed Target Devices", style = MaterialTheme.typography.titleMedium)
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             TextButton(onClick = onBack) {
                                 Text("Back")
                             }
                             Button(
                                 onClick = {
-                                    onTargetsChange(targets + newLockScreenScanTarget())
+                                    onTargetsChange(targets + newManagedTargetDevice())
                                 },
                             ) {
                                 Text("Add")
@@ -1326,7 +1330,7 @@ private fun LockScreenTargetsScreen(
                     }
 
                     Text(
-                        "These entries are exact lock-screen scan targets. When the screen turns off, Android-compatible hardware filters are built from exact MAC addresses and exact device names listed here.",
+                        "These entries define exact devices for special proxy operations. Android-compatible hardware filters can be built from exact MAC addresses and exact device names for screen-off scanning.",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -1339,12 +1343,12 @@ private fun LockScreenTargetsScreen(
                             .fillMaxWidth()
                             .padding(16.dp),
                     ) {
-                        Text("No lock-screen scan targets yet.", style = MaterialTheme.typography.bodyMedium)
+                        Text("No managed target devices yet.", style = MaterialTheme.typography.bodyMedium)
                     }
                 }
             } else {
                 targets.forEachIndexed { index, target ->
-                    LockScreenScanTargetCard(
+                    ManagedTargetDeviceCard(
                         index = index,
                         target = target,
                         onTargetChange = { updatedTarget ->
@@ -1369,15 +1373,15 @@ private fun LockScreenTargetsScreen(
 }
 
 @Composable
-private fun LockScreenScanTargetCard(
+private fun ManagedTargetDeviceCard(
     index: Int,
-    target: LockScreenScanTarget,
-    onTargetChange: (LockScreenScanTarget) -> Unit,
+    target: ManagedTargetDevice,
+    onTargetChange: (ManagedTargetDevice) -> Unit,
     onRemove: () -> Unit,
 ) {
     val normalizedMac = ProxyIdentity.normalizeMacAddress(target.macAddress)
     val macValid = target.macAddress.isBlank() || normalizedMac != null
-    val targetValid = isLockScreenScanTargetValid(target)
+    val targetValid = isManagedTargetDeviceValid(target)
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -1391,10 +1395,38 @@ private fun LockScreenScanTargetCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Target ${index + 1}", style = MaterialTheme.typography.titleSmall)
+                Text("Device ${index + 1}", style = MaterialTheme.typography.titleSmall)
                 TextButton(onClick = onRemove) {
                     Text("Remove")
                 }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Lock-Screen Scanning")
+                Switch(
+                    checked = target.enableLockScreenScan,
+                    onCheckedChange = { enabled ->
+                        onTargetChange(target.copy(enableLockScreenScan = enabled))
+                    },
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Auto-Pair Device")
+                Switch(
+                    checked = target.enableAutoPair,
+                    onCheckedChange = { enabled ->
+                        onTargetChange(target.copy(enableAutoPair = enabled))
+                    },
+                )
             }
 
             OutlinedTextField(
@@ -1424,9 +1456,9 @@ private fun LockScreenScanTargetCard(
                 text = when {
                     !macValid -> "Invalid MAC format. Use 12 hex bytes, for example AA:BB:CC:DD:EE:FF."
                     !targetValid -> "Enter at least one exact MAC address or exact device name."
-                    normalizedMac != null -> "Hardware-eligible lock-screen filter using MAC $normalizedMac"
-                    target.name.isNotBlank() -> "Hardware-eligible lock-screen filter using exact device name"
-                    else -> "Not eligible for lock-screen filtering"
+                    normalizedMac != null && target.enableLockScreenScan -> "Hardware-eligible lock-screen filter using MAC $normalizedMac"
+                    target.name.isNotBlank() && target.enableLockScreenScan -> "Hardware-eligible lock-screen filter using exact device name"
+                    else -> "Valid configuration"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = if (macValid && targetValid) {
@@ -1572,15 +1604,17 @@ private fun newAdvertisementFilterRule(): AdvertisementFilterRule {
     )
 }
 
-private fun newLockScreenScanTarget(): LockScreenScanTarget {
-    return LockScreenScanTarget(
+private fun newManagedTargetDevice(): ManagedTargetDevice {
+    return ManagedTargetDevice(
         id = UUID.randomUUID().toString(),
         macAddress = "",
         name = "",
+        enableLockScreenScan = true,
+        enableAutoPair = false,
     )
 }
 
-private fun isLockScreenScanTargetValid(target: LockScreenScanTarget): Boolean {
+private fun isManagedTargetDeviceValid(target: ManagedTargetDevice): Boolean {
     val hasValidMac = target.macAddress.isBlank() || ProxyIdentity.normalizeMacAddress(target.macAddress) != null
     val hasAnySelector = target.macAddress.isNotBlank() || target.name.trim().isNotBlank()
     return hasValidMac && hasAnySelector

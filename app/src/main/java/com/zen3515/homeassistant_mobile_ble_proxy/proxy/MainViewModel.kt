@@ -68,17 +68,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     minRssi = rule.minRssi.coerceIn(-127, 0),
                 )
             },
-            lockScreenScanTargets = settings.lockScreenScanTargets.mapNotNull { target ->
-                val normalizedMac = ProxyIdentity.normalizeMacAddress(target.macAddress.trim()).orEmpty()
-                val normalizedName = target.name.trim()
-                if (normalizedMac.isBlank() && normalizedName.isBlank()) {
-                    null
+            managedTargetDevices = settings.managedTargetDevices.mapNotNull { target ->
+                val mac = target.macAddress.trim()
+                if (mac.isBlank()) {
+                    target.copy(macAddress = "")
                 } else {
-                    LockScreenScanTarget(
-                        id = target.id.ifBlank { UUID.randomUUID().toString() },
-                        macAddress = normalizedMac,
-                        name = normalizedName,
-                    )
+                    val normalizedMac = ProxyIdentity.normalizeMacAddress(mac) ?: return@mapNotNull null
+                    target.copy(macAddress = normalizedMac)
                 }
             }.distinctBy { target ->
                 val macKey = target.macAddress.ifBlank { "-" }

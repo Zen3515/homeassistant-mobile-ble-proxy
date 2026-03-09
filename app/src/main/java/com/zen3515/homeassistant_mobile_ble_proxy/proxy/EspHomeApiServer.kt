@@ -31,6 +31,7 @@ class EspHomeApiServer(
 ) {
     private val noisePsk = decodeNoisePsk(settings.espHomeApiEncryptionKey)
     private val compiledAdvertisementFilters = compileAdvertisementFilters(settings.advertisementFilters)
+    private val autoPairMacsSet = settings.managedTargetDevices.filter { it.enableAutoPair }.map { it.macAddress.uppercase() }.toSet()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var acceptJob: Job? = null
@@ -554,6 +555,17 @@ class EspHomeApiServer(
     private fun handleGattEvent(event: BluetoothGattProxyManager.Event) {
         when (event) {
             is BluetoothGattProxyManager.Event.DeviceConnection -> {
+                if (event.connected) {
+                    val macAddress = ProxyIdentity.longToMac(event.address)
+                    if (autoPairMacsSet.contains(macAddress)) {
+                        log("Auto-pairing triggered for $macAddress upon connection")
+                        scope.launch {
+                            delay(50)
+                            gattManager.createBondIfUnbonded(event.address)
+                        }
+                    }
+                }
+
                 broadcast(
                     typeId = EspHomeMessageType.BLUETOOTH_DEVICE_CONNECTION_RESPONSE,
                     payload = EspHomeProtoCodec.encodeDeviceConnectionResponse(

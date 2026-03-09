@@ -33,7 +33,7 @@ class SettingsRepository(private val context: Context) {
         val autoAddMatchedDevicesToLockScreenTargets = booleanPreferencesKey(
             "auto_add_matched_devices_to_lock_screen_targets",
         )
-        val lockScreenScanTargets = stringPreferencesKey("lock_screen_scan_targets")
+        val managedTargetDevices = stringPreferencesKey("managed_target_devices")
     }
 
     val settings: Flow<ProxySettings> = context.dataStore.data.map { prefs ->
@@ -71,7 +71,7 @@ class SettingsRepository(private val context: Context) {
             } ?: NsdInterfaceMode.AUTO,
             advertisementFilters = decodeAdvertisementFilters(prefs[Keys.advertisementFilters]),
             autoAddMatchedDevicesToLockScreenTargets = prefs[Keys.autoAddMatchedDevicesToLockScreenTargets] ?: false,
-            lockScreenScanTargets = decodeLockScreenScanTargets(prefs[Keys.lockScreenScanTargets]),
+            managedTargetDevices = decodeManagedTargetDevices(prefs[Keys.managedTargetDevices]),
         )
     }
 
@@ -93,7 +93,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.nsdInterfaceMode] = settings.nsdInterfaceMode.name
             prefs[Keys.advertisementFilters] = encodeAdvertisementFilters(settings.advertisementFilters)
             prefs[Keys.autoAddMatchedDevicesToLockScreenTargets] = settings.autoAddMatchedDevicesToLockScreenTargets
-            prefs[Keys.lockScreenScanTargets] = encodeLockScreenScanTargets(settings.lockScreenScanTargets)
+            prefs[Keys.managedTargetDevices] = encodeManagedTargetDevices(settings.managedTargetDevices)
         }
     }
 
@@ -137,38 +137,40 @@ class SettingsRepository(private val context: Context) {
         return array.toString()
     }
 
-    private fun decodeLockScreenScanTargets(serialized: String?): List<LockScreenScanTarget> {
-        if (serialized.isNullOrBlank()) {
-            return emptyList()
-        }
-
-        return runCatching {
-            val jsonArray = JSONArray(serialized)
-            buildList {
-                for (index in 0 until jsonArray.length()) {
-                    val item = jsonArray.optJSONObject(index) ?: continue
-                    val id = item.optString("id").ifBlank { "target_$index" }
-                    add(
-                        LockScreenScanTarget(
-                            id = id,
-                            macAddress = item.optString("macAddress"),
-                            name = item.optString("name"),
-                        ),
-                    )
-                }
+    private fun decodeManagedTargetDevices(json: String?): List<ManagedTargetDevice> {
+        if (json.isNullOrBlank()) return emptyList()
+        return try {
+            val array = JSONArray(json)
+            val targets = mutableListOf<ManagedTargetDevice>()
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                targets.add(
+                    ManagedTargetDevice(
+                        id = obj.getString("id"),
+                        macAddress = obj.optString("mac_address", ""),
+                        name = obj.optString("name", ""),
+                        enableLockScreenScan = obj.optBoolean("enable_lock_screen_scan", true),
+                        enableAutoPair = obj.optBoolean("enable_auto_pair", false),
+                    ),
+                )
             }
-        }.getOrDefault(emptyList())
+            targets
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 
-    private fun encodeLockScreenScanTargets(targets: List<LockScreenScanTarget>): String {
+    private fun encodeManagedTargetDevices(targets: List<ManagedTargetDevice>): String {
         val array = JSONArray()
-        for (target in targets) {
-            array.put(
-                JSONObject()
-                    .put("id", target.id)
-                    .put("macAddress", target.macAddress)
-                    .put("name", target.name),
-            )
+        targets.forEach { target ->
+            val obj = JSONObject().apply {
+                put("id", target.id)
+                put("mac_address", target.macAddress)
+                put("name", target.name)
+                put("enable_lock_screen_scan", target.enableLockScreenScan)
+                put("enable_auto_pair", target.enableAutoPair)
+            }
+            array.put(obj)
         }
         return array.toString()
     }

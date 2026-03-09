@@ -21,10 +21,12 @@ data class AdvertisementFilterRule(
     val minRssi: Int = -127,
 )
 
-data class LockScreenScanTarget(
+data class ManagedTargetDevice(
     val id: String,
     val macAddress: String = "",
     val name: String = "",
+    val enableLockScreenScan: Boolean = true,
+    val enableAutoPair: Boolean = false,
 )
 
 data class ProxySettings(
@@ -44,5 +46,5 @@ data class ProxySettings(
     val nsdInterfaceMode: NsdInterfaceMode = NsdInterfaceMode.AUTO,
     val advertisementFilters: List<AdvertisementFilterRule> = emptyList(),
     val autoAddMatchedDevicesToLockScreenTargets: Boolean = false,
-    val lockScreenScanTargets: List<LockScreenScanTarget> = emptyList(),
+    val managedTargetDevices: List<ManagedTargetDevice> = emptyList(),
 )
