@@ -1,5 +1,8 @@
 # Home Assistant Mobile BLE Proxy
 
+[![License](https://img.shields.io/github/license/zen3515/homeassistant-mobile-ble-proxy.svg?style=for-the-badge&color=yellow)](LICENSE)
+![GitHub all releases](https://img.shields.io/github/downloads/zen3515/homeassistant-mobile-ble-proxy/total?style=for-the-badge&logo=appveyor)
+
 Android app that behaves like an ESPHome Bluetooth proxy and exposes the ESPHome native API on `6053/tcp`.
 
 It is designed for Home Assistant users who want to run BLE proxying on an Android phone instead of on an ESP32.
