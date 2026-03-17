@@ -209,6 +209,7 @@ class BleProxyForegroundService : Service() {
             apiServer = server
             nsdAdvertiser?.register(currentSettings, macAddress, port)
             ProxyRuntimeState.setServiceRunning(true, port)
+            BleProxyTileService.onServiceRunningChanged(applicationContext, true)
             logRuntime("Proxy listening on 0.0.0.0:$port (mac=$macAddress)")
             startSettingsSync()
             startScannerHealthWatchdog()
@@ -216,6 +217,7 @@ class BleProxyForegroundService : Service() {
         }.onFailure {
             started = false
             ProxyRuntimeState.setServiceRunning(false)
+            BleProxyTileService.onServiceRunningChanged(applicationContext, false)
             ProxyRuntimeState.setError("Failed to start proxy: ${it.message}")
             logRuntime("Failed to start proxy: ${it.message}")
             updateNotification("Failed to start")
@@ -244,6 +246,7 @@ class BleProxyForegroundService : Service() {
 
         started = false
         ProxyRuntimeState.setServiceRunning(false)
+        BleProxyTileService.onServiceRunningChanged(applicationContext, false)
         ProxyRuntimeState.setScannerState(RuntimeScannerState.IDLE)
         unregisterScreenReceiver()
         releaseWakeLockIfHeld()
