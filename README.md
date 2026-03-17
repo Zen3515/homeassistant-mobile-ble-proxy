@@ -125,6 +125,11 @@ There is no Home Assistant URL or Home Assistant API token in the normal flow. H
 - Pair, unpair, and clear-cache behavior depends on Android OEM BLE stack behavior.
 - For strict Bluetooth devices (like certain motorcycle stacks) that require a PIN or passkey, you can enable `Auto-Pair Device` in the target list so the proxy triggers an OS-level pairing prompt natively before Home Assistant drops the connection. After Android stores the bond, the proxy safely avoids redundant discoveries.
 
+## Downloads
+
+- [Download APK directly](https://github.com/zen3515/homeassistant-mobile-ble-proxy/releases)
+- [Use Obtainium](https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fapp%2F%7B%22id%22%3A%22com.zen3515.homeassistant_mobile_ble_proxy%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fzen3515%2Fhomeassistant-mobile-ble-proxy%22%2C%22author%22%3A%22Zen3515%22%2C%22name%22%3A%22HA%20Mobile%20BLE%20Proxy%22%2C%22additionalSettings%22%3A%22%7B%5C%22apkFilterRegEx%5C%22%3A%5C%22homeassistant-mobile-ble-proxy-v.%2A-release%5C%5C%5C%5C.apk%5C%22%2C%5C%22versionExtractionRegEx%5C%22%3A%5C%22v%28.%2B%29%5C%22%7D%22%7D) (recommended)
+
 ## Screenshots
 
 ![home-2](https://github.com/user-attachments/assets/99c78bca-ed2b-403e-9414-6885be5fc779)

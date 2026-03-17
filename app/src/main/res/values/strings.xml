@@ -4,4 +4,5 @@
     <string name="proxy_notification_channel_description">Keeps the ESPHome Bluetooth proxy running in the background</string>
     <string name="proxy_notification_title">ESPHome BLE Proxy Active</string>
     <string name="stop_proxy">Stop</string>
+    <string name="obtainium_app_url">https://apps.obtainium.imranr.dev/redirect?r=obtainium%3A%2F%2Fapp%2F%7B%22id%22%3A%22com.zen3515.homeassistant_mobile_ble_proxy%22%2C%22url%22%3A%22https%3A%2F%2Fgithub.com%2Fzen3515%2Fhomeassistant-mobile-ble-proxy%22%2C%22author%22%3A%22Zen3515%22%2C%22name%22%3A%22HA%20Mobile%20BLE%20Proxy%22%2C%22additionalSettings%22%3A%22%7B%5C%22apkFilterRegEx%5C%22%3A%5C%22homeassistant-mobile-ble-proxy-v.%2A-release%5C%5C%5C%5C.apk%5C%22%2C%5C%22versionExtractionRegEx%5C%22%3A%5C%22v%28.%2B%29%5C%22%7D%22%7D</string>
 </resources>

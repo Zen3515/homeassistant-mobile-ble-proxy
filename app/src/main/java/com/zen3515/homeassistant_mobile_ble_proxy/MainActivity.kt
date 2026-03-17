@@ -306,6 +306,8 @@ private fun HomeScreen(
     onToggleLogWrap: () -> Unit,
 ) {
     val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
+    val appVersion = remember(context) { readAppVersionName(context) }
 
     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
         Column(
@@ -553,6 +555,37 @@ private fun HomeScreen(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text("Configure Proxy Settings")
+                    }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("App Updates", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Version $appVersion",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "Import this repo into Obtainium and track GitHub release APK updates automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Button(
+                        onClick = {
+                            openExternalUrl(
+                                context = context,
+                                url = context.getString(R.string.obtainium_app_url),
+                                failureMessage = "Could not open the Obtainium import link.",
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Follow Updates with Obtainium")
                     }
                 }
             }
@@ -1586,6 +1619,28 @@ private fun isBatteryOptimizationIgnored(context: Context): Boolean {
     }
     val powerManager = context.getSystemService(PowerManager::class.java) ?: return false
     return powerManager.isIgnoringBatteryOptimizations(context.packageName)
+}
+
+private fun openExternalUrl(context: Context, url: String, failureMessage: String) {
+    val intent = Intent(Intent.ACTION_VIEW, url.toUri())
+    runCatching {
+        context.startActivity(intent)
+    }.onFailure {
+        Toast.makeText(context, failureMessage, Toast.LENGTH_LONG).show()
+    }
+}
+
+private fun readAppVersionName(context: Context): String {
+    val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        context.packageManager.getPackageInfo(
+            context.packageName,
+            PackageManager.PackageInfoFlags.of(0),
+        )
+    } else {
+        @Suppress("DEPRECATION")
+        context.packageManager.getPackageInfo(context.packageName, 0)
+    }
+    return packageInfo.versionName?.ifBlank { "unknown" } ?: "unknown"
 }
 
 private enum class NoiseKeyState {
