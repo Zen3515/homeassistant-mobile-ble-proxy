@@ -67,7 +67,7 @@
             android:name=".proxy.BleProxyTileService"
             android:enabled="true"
             android:exported="true"
-            android:icon="@mipmap/ic_launcher_monochrome"
+            android:icon="@drawable/ic_qs_ble_proxy"
             android:label="@string/qs_tile_label"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
