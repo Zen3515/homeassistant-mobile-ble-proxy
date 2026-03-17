@@ -53,7 +53,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             nodeName = sanitizedNodeName,
             friendlyName = sanitizedFriendlyName,
             apiPort = settings.apiPort.coerceIn(1024, 65535),
-            bluetoothMacOverride = settings.bluetoothMacOverride.trim(),
+            bluetoothMacOverride = settings.bluetoothMacOverride.trim()
+                .let { mac ->
+                    if (mac.isBlank()) {
+                        ""
+                    } else {
+                        ProxyIdentity.normalizeMacAddress(mac) ?: ""
+                    }
+                },
             espHomeApiEncryptionKey = settings.espHomeApiEncryptionKey.trim(),
             advertisementFlushIntervalMs = settings.advertisementFlushIntervalMs.coerceIn(50, 10_000),
             advertisementDedupWindowMs = settings.advertisementDedupWindowMs.coerceIn(0, 60_000),
@@ -70,12 +77,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             },
             managedTargetDevices = settings.managedTargetDevices.mapNotNull { target ->
                 val mac = target.macAddress.trim()
-                if (mac.isBlank()) {
-                    target.copy(macAddress = "")
+                val sanitizedTarget = if (mac.isBlank()) {
+                    target.copy(
+                        id = target.id.ifBlank { UUID.randomUUID().toString() },
+                        macAddress = "",
+                        name = target.name.trim(),
+                    )
                 } else {
                     val normalizedMac = ProxyIdentity.normalizeMacAddress(mac) ?: return@mapNotNull null
-                    target.copy(macAddress = normalizedMac)
+                    target.copy(
+                        id = target.id.ifBlank { UUID.randomUUID().toString() },
+                        macAddress = normalizedMac,
+                        name = target.name.trim(),
+                    )
                 }
+                if (sanitizedTarget.macAddress.isBlank() && sanitizedTarget.name.isBlank()) {
+                    return@mapNotNull null
+                }
+                sanitizedTarget
             }.distinctBy { target ->
                 val macKey = target.macAddress.ifBlank { "-" }
                 val nameKey = target.name.lowercase()

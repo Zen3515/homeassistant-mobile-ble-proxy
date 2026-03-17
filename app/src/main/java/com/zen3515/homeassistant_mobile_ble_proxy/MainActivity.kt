@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
@@ -73,8 +74,10 @@ import com.zen3515.homeassistant_mobile_ble_proxy.proxy.NsdInterfaceMode
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyIdentity
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyRuntimeSnapshot
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxySettings
+import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxySettingsJsonCodec
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ScannerMode
 import com.zen3515.homeassistant_mobile_ble_proxy.ui.theme.HaMobileBleProxyTheme
+import java.io.IOException
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -106,6 +109,10 @@ private enum class ProxyPage {
     MANAGED_TARGET_DEVICES,
 }
 
+private data class PendingImportedSettings(
+    val settings: ProxySettings,
+)
+
 @Composable
 private fun ProxyScreen(
     uiState: MainUiState,
@@ -129,6 +136,51 @@ private fun ProxyScreen(
             Toast.makeText(
                 context,
                 "Some permissions were denied. Open app permission settings if needed.",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+    val exportConfigLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        if (uri == null) {
+            return@rememberLauncherForActivityResult
+        }
+
+        runCatching {
+            writeTextToUri(
+                context = context,
+                uri = uri,
+                text = ProxySettingsJsonCodec.toJson(uiState.settings),
+            )
+        }.onSuccess {
+            Toast.makeText(context, "Config exported as JSON.", Toast.LENGTH_SHORT).show()
+        }.onFailure { error ->
+            Toast.makeText(
+                context,
+                "Failed to export config: ${error.message ?: "unknown error"}",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+    var pendingImportedSettings by remember {
+        mutableStateOf<PendingImportedSettings?>(null)
+    }
+    val importConfigLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) {
+            return@rememberLauncherForActivityResult
+        }
+
+        runCatching {
+            ProxySettingsJsonCodec.fromJson(readTextFromUri(context, uri))
+        }.onSuccess { importedSettings ->
+            pendingImportedSettings = PendingImportedSettings(importedSettings)
+        }.onFailure { error ->
+            Toast.makeText(
+                context,
+                "Failed to import config: ${error.message ?: "invalid JSON"}",
                 Toast.LENGTH_LONG,
             ).show()
         }
@@ -157,6 +209,35 @@ private fun ProxyScreen(
         watchdogIntervalInput = uiState.settings.scannerHealthCheckIntervalMs.toString()
         lowRateChecksInput = uiState.settings.scannerLowRateConsecutiveChecks.toString()
         currentPage = ProxyPage.SETTINGS
+    }
+
+    pendingImportedSettings?.let { pending ->
+        AlertDialog(
+            onDismissRequest = { pendingImportedSettings = null },
+            title = { Text("Import config") },
+            text = {
+                Text(
+                    buildImportedConfigSummary(pending.settings),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onSaveSettings(pending.settings)
+                        pendingImportedSettings = null
+                        currentPage = ProxyPage.HOME
+                        Toast.makeText(context, "Config imported.", Toast.LENGTH_SHORT).show()
+                    },
+                ) {
+                    Text("Import")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingImportedSettings = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 
     when (currentPage) {
@@ -206,6 +287,12 @@ private fun ProxyScreen(
                     }
                 },
                 onOpenSettings = openSettings,
+                onExportConfig = {
+                    exportConfigLauncher.launch("ha-mobile-ble-proxy-config.json")
+                },
+                onImportConfig = {
+                    importConfigLauncher.launch(arrayOf("application/json", "text/*"))
+                },
                 onClearLogs = onClearRuntimeLogs,
                 logWrapEnabled = logWrapEnabled,
                 onToggleLogWrap = { logWrapEnabled = !logWrapEnabled },
@@ -301,6 +388,8 @@ private fun HomeScreen(
     onOpenBatterySettings: () -> Unit,
     onOpenAppPermissionSettings: () -> Unit,
     onOpenSettings: () -> Unit,
+    onExportConfig: () -> Unit,
+    onImportConfig: () -> Unit,
     onClearLogs: () -> Unit,
     logWrapEnabled: Boolean,
     onToggleLogWrap: () -> Unit,
@@ -555,6 +644,33 @@ private fun HomeScreen(
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text("Configure Proxy Settings")
+                    }
+                }
+            }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("Config Backup", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Export or restore the full proxy configuration as JSON. This includes the BLE MAC override, ESPHome API key, filters, and managed target devices.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Button(
+                        onClick = onExportConfig,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Export Config JSON")
+                    }
+                    Button(
+                        onClick = onImportConfig,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Import Config JSON")
                     }
                 }
             }
@@ -1627,6 +1743,33 @@ private fun openExternalUrl(context: Context, url: String, failureMessage: Strin
         context.startActivity(intent)
     }.onFailure {
         Toast.makeText(context, failureMessage, Toast.LENGTH_LONG).show()
+    }
+}
+
+private fun writeTextToUri(context: Context, uri: Uri, text: String) {
+    val outputStream = context.contentResolver.openOutputStream(uri)
+        ?: throw IOException("Could not open the selected file for writing.")
+    outputStream.bufferedWriter().use { writer ->
+        writer.write(text)
+    }
+}
+
+private fun readTextFromUri(context: Context, uri: Uri): String {
+    val inputStream = context.contentResolver.openInputStream(uri)
+        ?: throw IOException("Could not open the selected file for reading.")
+    return inputStream.bufferedReader().use { reader ->
+        reader.readText()
+    }
+}
+
+private fun buildImportedConfigSummary(settings: ProxySettings): String {
+    return buildString {
+        append("Replace the current proxy settings with the imported JSON backup?\n\n")
+        append("Node: ${settings.nodeName}\n")
+        append("Friendly name: ${settings.friendlyName}\n")
+        append("Filters: ${settings.advertisementFilters.size}\n")
+        append("Managed target devices: ${settings.managedTargetDevices.size}\n")
+        append("Auto start on boot: ${if (settings.autoStartOnBoot) "on" else "off"}")
     }
 }
 
