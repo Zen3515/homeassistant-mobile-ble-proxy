@@ -112,6 +112,11 @@ class BluetoothGattProxyManager(
         UNPAIR,
     }
 
+    private enum class ServiceCachePolicy {
+        PREFER_PLATFORM_CACHE,
+        FORCE_DISCOVERY,
+    }
+
     private class ClearCacheSession(
         val gatt: BluetoothGatt,
         var completed: Boolean = false,
@@ -170,14 +175,19 @@ class BluetoothGattProxyManager(
         val address: Long,
         val macAddress: String,
         val gatt: BluetoothGatt,
+        var serviceCachePolicy: ServiceCachePolicy,
         var state: ConnectionState,
         var mtu: Int,
     ) {
+        var mtuNegotiationPending: Boolean = false
+        var mtuNegotiationTimeout: Runnable? = null
         var servicesLoaded: Boolean = false
         var serviceRefreshRequired: Boolean = false
         var rediscoverServicesWhenIdle: Boolean = false
         var discardNextServiceDiscoveryResult: Boolean = false
+        var pendingServiceDiscoveryReason: String? = null
         var emitServicesAfterDiscovery: Boolean = false
+        var emitServicesAfterMtu: Boolean = false
         var emitPairingSuccessAfterDiscovery: Boolean = false
         var nextDescriptorHandle: Int = SYNTHETIC_DESCRIPTOR_HANDLE_BASE
         val services: MutableList<EspHomeProtoCodec.GattService> = mutableListOf()
@@ -229,8 +239,16 @@ class BluetoothGattProxyManager(
             when (request.requestType) {
                 EspHomeProtoCodec.BluetoothDeviceRequestType.CONNECT,
                 EspHomeProtoCodec.BluetoothDeviceRequestType.CONNECT_V3_WITH_CACHE,
+                -> connectDevice(
+                    address = request.address,
+                    serviceCachePolicy = ServiceCachePolicy.PREFER_PLATFORM_CACHE,
+                )
+
                 EspHomeProtoCodec.BluetoothDeviceRequestType.CONNECT_V3_WITHOUT_CACHE,
-                -> connectDevice(request.address)
+                -> connectDevice(
+                    address = request.address,
+                    serviceCachePolicy = ServiceCachePolicy.FORCE_DISCOVERY,
+                )
 
                 EspHomeProtoCodec.BluetoothDeviceRequestType.DISCONNECT -> disconnectDevice(request.address)
 
@@ -251,7 +269,24 @@ class BluetoothGattProxyManager(
 
             if (connection.servicesLoaded && !connection.serviceRefreshRequired) {
                 connection.emitServicesAfterDiscovery = false
-                emitServices(connection)
+                if (connection.mtuNegotiationPending) {
+                    deferServicesUntilInitialMtu(connection, "already-loaded services")
+                } else {
+                    emitServices(connection)
+                }
+                return@runOnMain
+            }
+
+            if (connection.serviceCachePolicy == ServiceCachePolicy.PREFER_PLATFORM_CACHE &&
+                !connection.serviceRefreshRequired &&
+                tryPopulateServiceCacheFromPlatform(connection, "get_services request")
+            ) {
+                connection.emitServicesAfterDiscovery = false
+                if (connection.mtuNegotiationPending) {
+                    deferServicesUntilInitialMtu(connection, "platform cache")
+                } else {
+                    emitServices(connection)
+                }
                 return@runOnMain
             }
 
@@ -437,17 +472,10 @@ class BluetoothGattProxyManager(
         }
 
         if (bondState == BluetoothDevice.BOND_BONDED) {
-            val connection = connections[address]
-            if (connection != null &&
-                connection.state == ConnectionState.CONNECTED &&
-                (!connection.servicesLoaded || connection.serviceRefreshRequired)
-            ) {
-                connection.emitPairingSuccessAfterDiscovery = true
-                logInfo("GATT pair request for ${connection.macAddress}: already bonded, ensuring services are loaded")
-                requestServiceDiscovery(connection, "pair request on bonded connection")
-            } else {
-                emit(Event.DevicePairing(address = address, paired = true, error = 0))
+            connections[address]?.takeIf { it.state == ConnectionState.CONNECTED }?.let { connection ->
+                logInfo("GATT pair request for ${connection.macAddress}: already bonded, responding without rediscovery")
             }
+            emit(Event.DevicePairing(address = address, paired = true, error = 0))
             return
         }
 
@@ -699,20 +727,18 @@ class BluetoothGattProxyManager(
             return false
         }
 
-        val services = getGattServicesOrNull(connection) ?: run {
-            emit(Event.GattError(address = connection.address, handle = requestHandle, error = ERROR_PERMISSION_DENIED))
-            return false
+        if (connection.serviceCachePolicy == ServiceCachePolicy.PREFER_PLATFORM_CACHE &&
+            tryPopulateServiceCacheFromPlatform(connection, "platform cache")
+        ) {
+            return true
         }
 
-        if (services.isNotEmpty()) {
-            rebuildServiceCache(connection, services)
-            connection.servicesLoaded = true
-            logDiscoveredServices(connection, services, "platform cache")
-        }
-        return true
+        emit(Event.GattError(address = connection.address, handle = requestHandle, error = ERROR_INVALID_HANDLE))
+        return false
     }
 
     private fun emitServices(connection: Connection) {
+        connection.emitServicesAfterMtu = false
         if (connection.services.isNotEmpty()) {
             connection.services.forEach { service ->
                 emit(
@@ -727,6 +753,14 @@ class BluetoothGattProxyManager(
         emit(Event.GattServicesDone(connection.address))
     }
 
+    private fun deferServicesUntilInitialMtu(connection: Connection, source: String) {
+        connection.emitServicesAfterMtu = true
+        logInfo(
+            "GATT services ready for ${connection.macAddress} from $source; " +
+                "waiting for initial MTU gate before emitting",
+        )
+    }
+
     private fun enqueueOperation(connection: Connection, operation: PendingOperation) {
         connection.pendingOperations.addLast(operation)
         pumpOperationQueue(connection)
@@ -737,27 +771,43 @@ class BluetoothGattProxyManager(
             return
         }
 
+        connection.pendingServiceDiscoveryReason = reason
+        val cacheModeLabel = serviceCacheModeLabel(connection.serviceCachePolicy)
+        val mtuGateLabel = if (connection.mtuNegotiationPending) "pending" else "open"
         val inFlight = connection.inFlightOperation
         if (inFlight is PendingOperation.DiscoverServices) {
             if (connection.discardNextServiceDiscoveryResult) {
                 connection.rediscoverServicesWhenIdle = true
             }
-            logInfo("GATT service discovery already in progress for ${connection.macAddress}; reusing it for $reason")
+            logInfo(
+                "GATT service discovery already in progress for ${connection.macAddress}; " +
+                    "reusing it for reason=$reason, cache_mode=$cacheModeLabel, mtu_gate=$mtuGateLabel",
+            )
             return
         }
 
         if (connection.pendingOperations.any { it is PendingOperation.DiscoverServices }) {
-            logInfo("GATT service discovery already queued for ${connection.macAddress}; reusing it for $reason")
+            logInfo(
+                "GATT service discovery already queued for ${connection.macAddress}; " +
+                    "reusing it for reason=$reason, cache_mode=$cacheModeLabel, mtu_gate=$mtuGateLabel",
+            )
             return
         }
 
         connection.pendingOperations.addFirst(PendingOperation.DiscoverServices)
-        logInfo("GATT service discovery queued for ${connection.macAddress}: $reason")
+        logInfo(
+            "GATT service discovery queued for ${connection.macAddress}: " +
+                "reason=$reason, cache_mode=$cacheModeLabel, mtu_gate=$mtuGateLabel",
+        )
         pumpOperationQueue(connection)
     }
 
     private fun pumpOperationQueue(connection: Connection) {
         if (connection.inFlightOperation != null) {
+            return
+        }
+
+        if (connection.mtuNegotiationPending) {
             return
         }
 
@@ -775,7 +825,23 @@ class BluetoothGattProxyManager(
 
         val started = try {
             when (operation) {
-                PendingOperation.DiscoverServices -> connection.gatt.discoverServices()
+                PendingOperation.DiscoverServices -> {
+                    val discoveryReason = connection.pendingServiceDiscoveryReason ?: "unspecified"
+                    connection.gatt.discoverServices().also { startedDiscovery ->
+                        if (startedDiscovery) {
+                            logInfo(
+                                "GATT starting on-air service discovery for ${connection.macAddress}: " +
+                                    "reason=$discoveryReason, cache_mode=${serviceCacheModeLabel(connection.serviceCachePolicy)}",
+                            )
+                            connection.pendingServiceDiscoveryReason = null
+                        } else {
+                            logInfo(
+                                "GATT failed to start on-air service discovery for ${connection.macAddress}: " +
+                                    "reason=$discoveryReason, cache_mode=${serviceCacheModeLabel(connection.serviceCachePolicy)}",
+                            )
+                        }
+                    }
+                }
 
                 is PendingOperation.ReadCharacteristic -> connection.gatt.readCharacteristic(operation.characteristic)
 
@@ -859,8 +925,8 @@ class BluetoothGattProxyManager(
         connection.inFlightOperation = null
         if (connection.rediscoverServicesWhenIdle && connection.pendingOperations.none { it is PendingOperation.DiscoverServices }) {
             connection.rediscoverServicesWhenIdle = false
-            connection.pendingOperations.addFirst(PendingOperation.DiscoverServices)
-            logInfo("GATT queued follow-up post-bond service discovery for ${connection.macAddress}")
+            requestServiceDiscovery(connection, "post-bond rediscovery")
+            return
         }
         pumpOperationQueue(connection)
     }
@@ -876,13 +942,13 @@ class BluetoothGattProxyManager(
         emit(Event.GattError(connection.address, handle, error))
         if (connection.rediscoverServicesWhenIdle && connection.pendingOperations.none { it is PendingOperation.DiscoverServices }) {
             connection.rediscoverServicesWhenIdle = false
-            connection.pendingOperations.addFirst(PendingOperation.DiscoverServices)
-            logInfo("GATT retried post-bond service discovery for ${connection.macAddress} after discovery failure")
+            requestServiceDiscovery(connection, "post-bond rediscovery after discovery failure")
+            return
         }
         pumpOperationQueue(connection)
     }
 
-    private fun connectDevice(address: Long) {
+    private fun connectDevice(address: Long, serviceCachePolicy: ServiceCachePolicy) {
         if (!hasConnectPermission()) {
             emit(Event.DeviceConnection(address = address, connected = false, mtu = 0, error = ERROR_PERMISSION_DENIED))
             return
@@ -896,6 +962,7 @@ class BluetoothGattProxyManager(
 
         val existing = connections[address]
         if (existing != null) {
+            existing.serviceCachePolicy = serviceCachePolicy
             if (existing.state == ConnectionState.CONNECTED) {
                 emit(Event.DeviceConnection(address = address, connected = true, mtu = existing.mtu, error = 0))
             }
@@ -908,11 +975,13 @@ class BluetoothGattProxyManager(
         }
 
         val macAddress = ProxyIdentity.longToMac(address)
+        val cacheModeLabel = serviceCacheModeLabel(serviceCachePolicy)
         val device = runCatching { localAdapter.getRemoteDevice(macAddress) }
             .getOrElse {
                 emit(Event.DeviceConnection(address = address, connected = false, mtu = 0, error = ERROR_INVALID_HANDLE))
                 return
             }
+        logInfo("GATT connect request for $macAddress: cache_mode=$cacheModeLabel")
 
         val callback = createGattCallback(address)
         val gatt = try {
@@ -936,6 +1005,7 @@ class BluetoothGattProxyManager(
             address = address,
             macAddress = macAddress,
             gatt = gatt,
+            serviceCachePolicy = serviceCachePolicy,
             state = ConnectionState.CONNECTING,
             mtu = DEFAULT_MTU,
         )
@@ -970,6 +1040,9 @@ class BluetoothGattProxyManager(
         connections.remove(connection.address)
         updateAllocatedSnapshot()
 
+        connection.mtuNegotiationTimeout?.let(mainHandler::removeCallbacks)
+        connection.mtuNegotiationTimeout = null
+        connection.mtuNegotiationPending = false
         closeGattQuietly(connection.gatt, connection.macAddress)
 
         connection.inFlightOperation = null
@@ -990,6 +1063,23 @@ class BluetoothGattProxyManager(
         connection.characteristicsByHandle.clear()
         connection.descriptorsByHandle.clear()
         connection.nextDescriptorHandle = SYNTHETIC_DESCRIPTOR_HANDLE_BASE
+    }
+
+    private fun tryPopulateServiceCacheFromPlatform(connection: Connection, source: String): Boolean {
+        val services = getGattServicesOrNull(connection) ?: return false
+        if (services.isEmpty()) {
+            return false
+        }
+
+        rebuildServiceCache(connection, services)
+        connection.servicesLoaded = true
+        connection.serviceRefreshRequired = false
+        logInfo(
+            "GATT loaded services from platform cache for ${connection.macAddress}: " +
+                "reason=$source, cache_mode=${serviceCacheModeLabel(connection.serviceCachePolicy)}",
+        )
+        logDiscoveredServices(connection, services, source)
+        return true
     }
 
     private fun preparePostBondServiceRefresh(connection: Connection, reason: String) {
@@ -1013,6 +1103,51 @@ class BluetoothGattProxyManager(
         logInfo("GATT bond completed for ${connection.macAddress}; requesting authenticated service rediscovery")
         requestServiceDiscovery(connection, reason)
     }
+
+    private fun beginInitialMtuNegotiation(connection: Connection) {
+        connection.mtuNegotiationTimeout?.let(mainHandler::removeCallbacks)
+        connection.mtuNegotiationPending = true
+        val timeout = Runnable {
+            runOnMain {
+                val current = connections[connection.address] ?: return@runOnMain
+                if (current !== connection || !connection.mtuNegotiationPending) {
+                    return@runOnMain
+                }
+                logInfo(
+                    "GATT initial MTU negotiation timed out for ${connection.macAddress}; " +
+                        "continuing with mtu=${connection.mtu}",
+                )
+                completeInitialMtuNegotiation(connection, "timeout")
+            }
+        }
+        connection.mtuNegotiationTimeout = timeout
+        mainHandler.postDelayed(timeout, INITIAL_MTU_TIMEOUT_MS)
+    }
+
+    private fun completeInitialMtuNegotiation(connection: Connection, releaseReason: String) {
+        if (!connection.mtuNegotiationPending) {
+            return
+        }
+        connection.mtuNegotiationPending = false
+        connection.mtuNegotiationTimeout?.let(mainHandler::removeCallbacks)
+        connection.mtuNegotiationTimeout = null
+        logInfo(
+            "GATT initial MTU gate opened for ${connection.macAddress}: " +
+                "reason=$releaseReason, mtu=${connection.mtu}, queued_ops=${connection.pendingOperations.size}, " +
+                "emit_services=${connection.emitServicesAfterMtu}",
+        )
+        if (connection.emitServicesAfterMtu && connection.servicesLoaded && !connection.serviceRefreshRequired) {
+            logInfo("GATT emitting deferred services for ${connection.macAddress} after initial MTU gate opened")
+            emitServices(connection)
+        }
+        pumpOperationQueue(connection)
+    }
+
+    private fun serviceCacheModeLabel(policy: ServiceCachePolicy): String =
+        when (policy) {
+            ServiceCachePolicy.PREFER_PLATFORM_CACHE -> "prefer-cache"
+            ServiceCachePolicy.FORCE_DISCOVERY -> "force-discovery"
+        }
 
     private fun rebuildServiceCache(connection: Connection, services: List<BluetoothGattService>) {
         clearServiceCache(connection)
@@ -1066,8 +1201,10 @@ class BluetoothGattProxyManager(
                             return@runOnMain
                         }
                         try {
+                            beginInitialMtuNegotiation(connection)
                             if (!gatt.requestMtu(REQUESTED_MTU)) {
                                 logInfo("GATT MTU request returned false for ${connection.macAddress}; continuing with default MTU ${connection.mtu}")
+                                completeInitialMtuNegotiation(connection, "requestMtu returned false")
                             }
                         } catch (securityException: SecurityException) {
                             onError("MTU request permission denied for ${connection.macAddress}: ${securityException.message}")
@@ -1098,7 +1235,13 @@ class BluetoothGattProxyManager(
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         connection.mtu = mtu
                         logInfo("GATT MTU changed for ${connection.macAddress}: mtu=$mtu")
+                    } else {
+                        logInfo(
+                            "GATT MTU request failed for ${connection.macAddress}: " +
+                                "status=$status, continuing with mtu=${connection.mtu}",
+                        )
                     }
+                    completeInitialMtuNegotiation(connection, "onMtuChanged status=$status")
                 }
             }
 
@@ -1630,6 +1773,7 @@ class BluetoothGattProxyManager(
         private const val DEFAULT_MAX_CONNECTIONS = 5
         private const val DEFAULT_MTU = 23
         private const val REQUESTED_MTU = 517
+        private const val INITIAL_MTU_TIMEOUT_MS = 1_500L
         private const val SYNTHETIC_DESCRIPTOR_HANDLE_BASE = 0x10000
         private const val BOND_TIMEOUT_MS = 15_000L
         private const val CLEAR_CACHE_TIMEOUT_MS = 12_000L
