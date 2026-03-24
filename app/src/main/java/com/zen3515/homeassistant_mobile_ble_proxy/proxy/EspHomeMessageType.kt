@@ -53,6 +53,7 @@ object BluetoothProxyFeatureFlags {
     const val ACTIVE_FEATURE_FLAGS =
         PASSIVE_FEATURE_FLAGS or
             FEATURE_ACTIVE_CONNECTIONS or
+            FEATURE_REMOTE_CACHING or
             FEATURE_PAIRING or
             FEATURE_CACHE_CLEARING
 }
