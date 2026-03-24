@@ -189,9 +189,10 @@ class BluetoothGattProxyManager(
         var emitServicesAfterDiscovery: Boolean = false
         var emitServicesAfterMtu: Boolean = false
         var emitPairingSuccessAfterDiscovery: Boolean = false
-        var nextDescriptorHandle: Int = SYNTHETIC_DESCRIPTOR_HANDLE_BASE
+        var nextSyntheticHandle: Int = 1
         val services: MutableList<EspHomeProtoCodec.GattService> = mutableListOf()
         val characteristicsByHandle: MutableMap<Int, BluetoothGattCharacteristic> = mutableMapOf()
+        val characteristicHandlesByCharacteristic: MutableMap<BluetoothGattCharacteristic, Int> = mutableMapOf()
         val descriptorsByHandle: MutableMap<Int, BluetoothGattDescriptor> = mutableMapOf()
 
         val pendingOperations: ArrayDeque<PendingOperation> = ArrayDeque()
@@ -1061,8 +1062,9 @@ class BluetoothGattProxyManager(
         connection.servicesLoaded = false
         connection.services.clear()
         connection.characteristicsByHandle.clear()
+        connection.characteristicHandlesByCharacteristic.clear()
         connection.descriptorsByHandle.clear()
-        connection.nextDescriptorHandle = SYNTHETIC_DESCRIPTOR_HANDLE_BASE
+        connection.nextSyntheticHandle = 1
     }
 
     private fun tryPopulateServiceCacheFromPlatform(connection: Connection, source: String): Boolean {
@@ -1153,18 +1155,20 @@ class BluetoothGattProxyManager(
         clearServiceCache(connection)
 
         for (service in services) {
+            val serviceHandle = connection.nextSyntheticHandle++
             val characteristics = service.characteristics.map { characteristic ->
+                val characteristicHandle = connection.nextSyntheticHandle++
+                connection.characteristicsByHandle[characteristicHandle] = characteristic
+                connection.characteristicHandlesByCharacteristic[characteristic] = characteristicHandle
+
                 val descriptors = characteristic.descriptors.map { descriptor ->
-                    val descriptorHandle = connection.nextDescriptorHandle++
+                    val descriptorHandle = connection.nextSyntheticHandle++
                     connection.descriptorsByHandle[descriptorHandle] = descriptor
                     EspHomeProtoCodec.GattDescriptor(
                         uuid = descriptor.uuid,
                         handle = descriptorHandle,
                     )
                 }
-
-                val characteristicHandle = characteristic.instanceId
-                connection.characteristicsByHandle[characteristicHandle] = characteristic
 
                 EspHomeProtoCodec.GattCharacteristic(
                     uuid = characteristic.uuid,
@@ -1176,10 +1180,12 @@ class BluetoothGattProxyManager(
 
             connection.services += EspHomeProtoCodec.GattService(
                 uuid = service.uuid,
-                handle = service.instanceId,
+                handle = serviceHandle,
                 characteristics = characteristics,
             )
         }
+
+        logExportedServices(connection, services)
     }
 
     private fun createGattCallback(address: Long): BluetoothGattCallback {
@@ -1467,15 +1473,16 @@ class BluetoothGattProxyManager(
                     if (connection.gatt != gatt) {
                         return@runOnMain
                     }
+                    val handle = resolveCharacteristicHandle(connection, characteristic) ?: return@runOnMain
 
                     emit(
                         Event.GattNotifyData(
                             address = address,
-                            handle = characteristic.instanceId,
+                            handle = handle,
                             data = value.copyOf(),
                         )
                     )
-                    logInfo("GATT notify data for ${connection.macAddress}: handle=${characteristic.instanceId}, bytes=${value.size}")
+                    logInfo("GATT notify data for ${connection.macAddress}: handle=$handle, bytes=${value.size}")
                 }
             }
         }
@@ -1604,6 +1611,33 @@ class BluetoothGattProxyManager(
             "GATT services discovered for ${connection.macAddress} via $source: " +
                 "services=${services.size}, characteristics=$characteristicCount, uuids=$serviceSummary",
         )
+    }
+
+    private fun logExportedServices(connection: Connection, services: List<BluetoothGattService>) {
+        val exported = connection.services
+        if (services.isEmpty() || exported.isEmpty()) {
+            return
+        }
+
+        val summary = services.zip(exported).joinToString(",") { (platformService, exportedService) ->
+            "${platformService.uuid}@android_instance=${platformService.instanceId}->proxy_handle=${exportedService.handle}"
+        }
+        logInfo("GATT exported service table for ${connection.macAddress}: $summary")
+    }
+
+    private fun resolveCharacteristicHandle(
+        connection: Connection,
+        characteristic: BluetoothGattCharacteristic,
+    ): Int? {
+        connection.characteristicHandlesByCharacteristic[characteristic]?.let { return it }
+
+        val resolved = connection.characteristicsByHandle.entries.firstOrNull { (_, cached) ->
+            cached === characteristic ||
+                (cached.uuid == characteristic.uuid && cached.instanceId == characteristic.instanceId)
+        }?.key ?: return null
+
+        connection.characteristicHandlesByCharacteristic[characteristic] = resolved
+        return resolved
     }
 
     private fun characteristicSupportsIndication(characteristic: BluetoothGattCharacteristic): Boolean {
@@ -1774,7 +1808,6 @@ class BluetoothGattProxyManager(
         private const val DEFAULT_MTU = 23
         private const val REQUESTED_MTU = 517
         private const val INITIAL_MTU_TIMEOUT_MS = 1_500L
-        private const val SYNTHETIC_DESCRIPTOR_HANDLE_BASE = 0x10000
         private const val BOND_TIMEOUT_MS = 15_000L
         private const val CLEAR_CACHE_TIMEOUT_MS = 12_000L
 
