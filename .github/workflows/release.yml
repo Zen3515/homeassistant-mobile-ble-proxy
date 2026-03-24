@@ -130,9 +130,10 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
+          prerelease: true
           generate_release_notes: true
           body: |
-            Android release build for `${{ github.ref_name }}`.
+            Android build for `${{ github.ref_name }}`.
 
             - `versionName`: `${{ steps.version.outputs.version_name }}`
             - `versionCode`: `${{ steps.version.outputs.version_code }}`
