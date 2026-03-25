@@ -182,6 +182,7 @@ class BluetoothGattProxyManager(
         var state: ConnectionState,
         var mtu: Int,
     ) {
+        var connectTimeout: Runnable? = null
         var mtuNegotiationPending: Boolean = false
         var mtuNegotiationTimeout: Runnable? = null
         var servicesLoaded: Boolean = false
@@ -1015,8 +1016,13 @@ class BluetoothGattProxyManager(
             existing.serviceCachePolicy = serviceCachePolicy
             if (existing.state == ConnectionState.CONNECTED) {
                 emit(Event.DeviceConnection(address = address, connected = true, mtu = existing.mtu, error = 0))
+                return
             }
-            return
+            logInfo(
+                "GATT connect request for ${existing.macAddress} arrived while state=${existing.state.name.lowercase()}; " +
+                    "closing stale connection before retry",
+            )
+            closeConnection(existing, ERROR_OPERATION_FAILED)
         }
 
         if (connections.size >= maxConnections) {
@@ -1059,6 +1065,7 @@ class BluetoothGattProxyManager(
             state = ConnectionState.CONNECTING,
             mtu = DEFAULT_MTU,
         )
+        scheduleConnectTimeout(connections.getValue(address))
         updateAllocatedSnapshot()
         emitConnectionsChanged()
     }
@@ -1090,6 +1097,8 @@ class BluetoothGattProxyManager(
         connections.remove(connection.address)
         updateAllocatedSnapshot()
 
+        connection.connectTimeout?.let(mainHandler::removeCallbacks)
+        connection.connectTimeout = null
         connection.mtuNegotiationTimeout?.let(mainHandler::removeCallbacks)
         connection.mtuNegotiationTimeout = null
         connection.mtuNegotiationPending = false
@@ -1175,6 +1184,23 @@ class BluetoothGattProxyManager(
         mainHandler.postDelayed(timeout, INITIAL_MTU_TIMEOUT_MS)
     }
 
+    private fun scheduleConnectTimeout(connection: Connection) {
+        connection.connectTimeout?.let(mainHandler::removeCallbacks)
+        val timeout = Runnable {
+            val current = connections[connection.address]
+            if (current !== connection || connection.state != ConnectionState.CONNECTING) {
+                return@Runnable
+            }
+            logInfo(
+                "GATT connect attempt timed out for ${connection.macAddress} after ${CONNECT_TIMEOUT_MS}ms; " +
+                    "closing stale pending connection",
+            )
+            closeConnection(connection, ERROR_OPERATION_FAILED)
+        }
+        connection.connectTimeout = timeout
+        mainHandler.postDelayed(timeout, CONNECT_TIMEOUT_MS)
+    }
+
     private fun completeInitialMtuNegotiation(connection: Connection, releaseReason: String) {
         if (!connection.mtuNegotiationPending) {
             return
@@ -1248,6 +1274,8 @@ class BluetoothGattProxyManager(
                     }
 
                     if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                        connection.connectTimeout?.let(mainHandler::removeCallbacks)
+                        connection.connectTimeout = null
                         connection.state = ConnectionState.CONNECTED
                         logInfo("GATT connected to ${connection.macAddress}; requesting MTU $REQUESTED_MTU")
                         emit(Event.DeviceConnection(address = connection.address, connected = true, mtu = connection.mtu, error = 0))
@@ -1870,6 +1898,7 @@ class BluetoothGattProxyManager(
         private const val DEFAULT_MAX_CONNECTIONS = 5
         private const val DEFAULT_MTU = 23
         private const val REQUESTED_MTU = 517
+        private const val CONNECT_TIMEOUT_MS = 10_000L
         private const val INITIAL_MTU_TIMEOUT_MS = 1_500L
         private const val BOND_TIMEOUT_MS = 15_000L
         private const val CLEAR_CACHE_TIMEOUT_MS = 12_000L
