@@ -165,6 +165,13 @@ class BluetoothGattProxyManager(
         ) : PendingOperation {
             override val errorHandle: Int = handle
         }
+
+        data class NotifyHandle(
+            val handle: Int,
+            val enable: Boolean,
+        ) : PendingOperation {
+            override val errorHandle: Int = handle
+        }
     }
 
     private class Connection(
@@ -399,33 +406,10 @@ class BluetoothGattProxyManager(
                 return@runOnMain
             }
 
-            if (!ensureServiceCache(connection, request.handle)) {
-                return@runOnMain
-            }
-            val characteristic = connection.characteristicsByHandle[request.handle]
-            if (characteristic == null) {
-                emit(Event.GattError(address = request.address, handle = request.handle, error = ERROR_INVALID_HANDLE))
-                return@runOnMain
-            }
-
-            val clientConfigDescriptor = characteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID)
-            if (clientConfigDescriptor == null) {
-                emit(Event.GattError(address = request.address, handle = request.handle, error = ERROR_INVALID_HANDLE))
-                return@runOnMain
-            }
-
-            logInfo(
-                "GATT notify request for ${connection.macAddress}: " +
-                    "handle=${request.handle}, uuid=${characteristic.uuid}, enable=${request.enable}, " +
-                    "properties=${describeCharacteristicProperties(characteristic.properties)}, cccd=${clientConfigDescriptor.uuid}",
-            )
-
             enqueueOperation(
                 connection,
-                PendingOperation.Notify(
+                PendingOperation.NotifyHandle(
                     handle = request.handle,
-                    characteristic = characteristic,
-                    clientConfigDescriptor = clientConfigDescriptor,
                     enable = request.enable,
                 ),
             )
@@ -891,6 +875,51 @@ class BluetoothGattProxyManager(
                         )
                     }
                 }
+
+                is PendingOperation.NotifyHandle -> {
+                    val characteristic = resolveCharacteristicForQueuedNotify(connection, operation) ?: return
+                    val clientConfigDescriptor = characteristic.getDescriptor(CLIENT_CHARACTERISTIC_CONFIG_UUID)
+                    if (clientConfigDescriptor == null) {
+                        failOperation(connection, operation.handle, ERROR_INVALID_HANDLE)
+                        return
+                    }
+
+                    logInfo(
+                        "GATT notify request for ${connection.macAddress}: " +
+                            "handle=${operation.handle}, uuid=${characteristic.uuid}, enable=${operation.enable}, " +
+                            "properties=${describeCharacteristicProperties(characteristic.properties)}, cccd=${clientConfigDescriptor.uuid}",
+                    )
+
+                    val cccdValue = when {
+                        operation.enable && characteristicSupportsIndication(characteristic) ->
+                            BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                        operation.enable -> BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        else -> BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                    }
+                    val notifyMode = when {
+                        cccdValue.contentEquals(BluetoothGattDescriptor.ENABLE_INDICATION_VALUE) -> "indication"
+                        operation.enable -> "notification"
+                        else -> "disable"
+                    }
+                    logInfo(
+                        "GATT ${if (operation.enable) "enable" else "disable"} notify start for ${connection.macAddress}: " +
+                            "handle=${operation.handle}, uuid=${characteristic.uuid}, mode=$notifyMode",
+                    )
+                    val subscribed = connection.gatt.setCharacteristicNotification(
+                        characteristic,
+                        operation.enable,
+                    )
+                    if (!subscribed) {
+                        logInfo("GATT setCharacteristicNotification returned false for ${connection.macAddress}: handle=${operation.handle}")
+                        false
+                    } else {
+                        writeDescriptorCompat(
+                            gatt = connection.gatt,
+                            descriptor = clientConfigDescriptor,
+                            data = cccdValue,
+                        )
+                    }
+                }
             }
         } catch (securityException: SecurityException) {
             failOperation(connection, operation.errorHandle, ERROR_PERMISSION_DENIED)
@@ -937,6 +966,36 @@ class BluetoothGattProxyManager(
             return
         }
         pumpOperationQueue(connection)
+    }
+
+    private fun resolveCharacteristicForQueuedNotify(
+        connection: Connection,
+        operation: PendingOperation.NotifyHandle,
+    ): BluetoothGattCharacteristic? {
+        if (connection.serviceRefreshRequired) {
+            failOperation(connection, operation.handle, ERROR_BUSY)
+            return null
+        }
+
+        if (!connection.servicesLoaded) {
+            if (connection.serviceCachePolicy == ServiceCachePolicy.PREFER_PLATFORM_CACHE &&
+                tryPopulateServiceCacheFromPlatform(connection, "notify handle=${operation.handle}")
+            ) {
+                // Continue with the newly loaded cache.
+            } else {
+                connection.inFlightOperation = null
+                connection.pendingOperations.addFirst(operation)
+                requestServiceDiscovery(connection, "notify handle=${operation.handle} cache miss")
+                return null
+            }
+        }
+
+        val characteristic = connection.characteristicsByHandle[operation.handle]
+        if (characteristic == null) {
+            failOperation(connection, operation.handle, ERROR_INVALID_HANDLE)
+            return null
+        }
+        return characteristic
     }
 
     private fun connectDevice(address: Long, serviceCachePolicy: ServiceCachePolicy) {
@@ -1366,6 +1425,20 @@ class BluetoothGattProxyManager(
                         }
 
                         is PendingOperation.Notify -> {
+                            if (status == BluetoothGatt.GATT_SUCCESS) {
+                                logInfo("GATT notify descriptor write complete for ${connection.macAddress}: handle=${inFlight.handle}")
+                                emit(Event.GattNotify(address = address, handle = inFlight.handle))
+                                completeOperation(connection)
+                            } else {
+                                logInfo(
+                                    "GATT notify descriptor write failed for ${connection.macAddress}: " +
+                                        "handle=${inFlight.handle}, status=$status",
+                                )
+                                failOperation(connection, inFlight.handle, status)
+                            }
+                        }
+
+                        is PendingOperation.NotifyHandle -> {
                             if (status == BluetoothGatt.GATT_SUCCESS) {
                                 logInfo("GATT notify descriptor write complete for ${connection.macAddress}: handle=${inFlight.handle}")
                                 emit(Event.GattNotify(address = address, handle = inFlight.handle))
