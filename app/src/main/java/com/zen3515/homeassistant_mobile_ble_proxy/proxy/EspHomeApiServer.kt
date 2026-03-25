@@ -811,7 +811,6 @@ class EspHomeApiServer(
         synchronized(discoveryThrottleLock) {
             for (advertisement in batch) {
                 if (advertisement.address in activeInteractionAddresses) {
-                    forwarded += advertisement
                     continue
                 }
 
@@ -880,10 +879,10 @@ class EspHomeApiServer(
 
         synchronized(dedupLock) {
             for (advertisement in batch) {
-                // Active GATT interaction addresses bypass discovery dedup to keep
-                // live BLE operations responsive.
+                // Suppress advertisements for addresses with an active GATT session.
+                // Those advertisements are not useful while connected and can starve
+                // the same ESPHome API channel that carries GATT responses.
                 if (advertisement.address in activeInteractionAddresses) {
-                    filtered += advertisement
                     continue
                 }
 
