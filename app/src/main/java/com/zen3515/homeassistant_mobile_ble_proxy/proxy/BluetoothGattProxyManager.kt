@@ -63,13 +63,9 @@ class BluetoothGattProxyManager(
             val allocated: List<Long>,
         ) : Event
 
-        data class GattServices(
+        data class GattServicesComplete(
             val address: Long,
             val services: List<EspHomeProtoCodec.GattService>,
-        ) : Event
-
-        data class GattServicesDone(
-            val address: Long,
         ) : Event
 
         class GattRead(
@@ -740,18 +736,12 @@ class BluetoothGattProxyManager(
 
     private fun emitServices(connection: Connection) {
         connection.emitServicesAfterMtu = false
-        if (connection.services.isNotEmpty()) {
-            connection.services.forEach { service ->
-                emit(
-                    Event.GattServices(
-                        address = connection.address,
-                        services = listOf(service),
-                    )
-                )
-            }
-        }
-
-        emit(Event.GattServicesDone(connection.address))
+        emit(
+            Event.GattServicesComplete(
+                address = connection.address,
+                services = connection.services.toList(),
+            )
+        )
     }
 
     private fun deferServicesUntilInitialMtu(connection: Connection, source: String) {

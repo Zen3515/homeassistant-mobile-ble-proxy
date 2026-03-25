@@ -614,7 +614,7 @@ class EspHomeApiServer(
                 broadcastConnectionsFree()
             }
 
-            is BluetoothGattProxyManager.Event.GattServices -> {
+            is BluetoothGattProxyManager.Event.GattServicesComplete -> {
                 broadcast(
                     typeId = EspHomeMessageType.BLUETOOTH_GATT_GET_SERVICES_RESPONSE,
                     payload = EspHomeProtoCodec.encodeGattGetServicesResponse(
@@ -622,9 +622,6 @@ class EspHomeApiServer(
                         services = event.services,
                     ),
                 ) { true }
-            }
-
-            is BluetoothGattProxyManager.Event.GattServicesDone -> {
                 broadcast(
                     typeId = EspHomeMessageType.BLUETOOTH_GATT_GET_SERVICES_DONE_RESPONSE,
                     payload = EspHomeProtoCodec.encodeGattGetServicesDoneResponse(event.address),
