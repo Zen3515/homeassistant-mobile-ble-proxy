@@ -7,6 +7,16 @@ During the development and testing of the `ManagedTargetDevice` Auto-Pairing fea
 
 Logs revealed the device was intentionally terminating the link (`status=8` / `GATT_CONN_TIMEOUT` / `HCI_ERR_CONN_TIMEOUT`). Connecting with standard low-energy tools (like nRF Connect) did not reproduce the issue unless specific connection steps were taken.
 
+## Resolved Follow-Up: Random Rideology Startup Failure
+A later, separate issue looked similar from the outside but had a different root cause. The proxy successfully discovered all 4 Android-side services, yet Home Assistant sometimes built a truncated 3-service remote table and missed the final Kawasaki service `92faec07-c075-4b7c-a6c2-bbd1d1a150f5`. That caused startup notify resolution to fail randomly until repeated retries happened to work.
+
+The final fix for that randomness was not another MTU or auto-pair tweak. It was protocol correctness:
+
+- **Do not expose Android `instanceId` values as ESPHome GATT handles.** They are instance identifiers, not real ATT handles. The proxy now exports synthetic per-connection handles for services, characteristics, and descriptors.
+- **Do not let the GATT `...GET_SERVICES_DONE_RESPONSE` overtake the last service payload.** Home Assistant stops collecting as soon as it sees the done marker. The proxy must send the full service payload and only then send the done marker in the same ordered path.
+
+This resolved the "works after many retries" behavior for the Kawasaki / Rideology flow.
+
 ## Root Cause Analysis and Findings
 The core issue stems from overlapping GATT operations triggered simultaneously by Home Assistant's native connection flow and Android's asynchronous BLE queue.
 
@@ -26,6 +36,7 @@ Deferring the MTU size negotiation on an already-bonded device interrupted Andro
 The final, working solution requires the proxy to act passively regarding Service Discoveries while aggressively triggering the Android OS-level pairing intent.
 
 - **MTU remains synchronous:** The proxy requests the required MTU immediately upon the `STATE_CONNECTED` callback. This fulfills Home Assistant's expectation and does not interrupt encryption handshakes.
+- **Queued GATT traffic waits for the initial MTU result:** The proxy may request the MTU immediately, but it should not rush subsequent queued GATT operations ahead of that initial `onMtuChanged(...)` callback or a short timeout fallback. This keeps early CCCD writes and other traffic from racing Android's initial encrypted-link setup.
 - **Service Discovery is un-touched:** The proxy never manually triggers `discoverServices()` for an auto-pairing event. It trusts Home Assistant's API to prompt it when ready.
 - **Safe Bonding Interception (`createBondIfUnbonded`):** The Auto-Pair interceptor in `EspHomeApiServer` now explicitly calls a restricted helper:
     1. It checks if the `BluetoothDevice` is currently `BOND_NONE`.
@@ -35,4 +46,7 @@ The final, working solution requires the proxy to act passively regarding Servic
 ## Guidelines for Future Contributors
 1. **Never trigger `discoverServices()` proactively on behalf of Home Assistant.** Let the ESPHome API orchestrate when services should be discovered to prevent fatal Android queue overlaps on embedded targets.
 2. **Never artificially delay the MTU Request if the connection state is marked as connected.**
-3. **Handle Bonding via `createBondIfUnbonded(address)`**. Do not use standard GATT interceptors to manage Android's bond state during active proxy sessions, as it creates race conditions.
+3. **Do not let queued GATT operations outrun the initial MTU negotiation.** Start the MTU request immediately, then release the normal GATT queue after the MTU callback or a short timeout.
+4. **Handle Bonding via `createBondIfUnbonded(address)`**. Do not use standard GATT interceptors to manage Android's bond state during active proxy sessions, as it creates race conditions.
+5. **Export synthetic proxy handles, not Android `instanceId` values.** ESPHome / Bleak treat these as remote GATT handles, so they must be unique and stable for the connection lifetime.
+6. **Emit the complete services response before the done marker without cross-coroutine reordering.** If `...GET_SERVICES_DONE_RESPONSE` can arrive early, Home Assistant may cache a truncated service table.
