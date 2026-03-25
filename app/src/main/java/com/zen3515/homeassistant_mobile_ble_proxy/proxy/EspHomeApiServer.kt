@@ -555,6 +555,13 @@ class EspHomeApiServer(
     private fun handleGattEvent(event: BluetoothGattProxyManager.Event) {
         when (event) {
             is BluetoothGattProxyManager.Event.DeviceConnection -> {
+                if (!event.connected) {
+                    clearAdvertisementRuntimeStateForAddress(
+                        address = event.address,
+                        reason = "GATT disconnect",
+                    )
+                }
+
                 if (event.connected) {
                     val macAddress = ProxyIdentity.longToMac(event.address)
                     if (autoPairMacsSet.contains(macAddress)) {
@@ -1113,6 +1120,39 @@ class EspHomeApiServer(
         immediateFlushScheduled.set(false)
     }
 
+    private fun clearAdvertisementRuntimeStateForAddress(address: Long, reason: String) {
+        var removedObservedFingerprints = 0
+        val removedPending = synchronized(pendingAdvertisementsLock) {
+            val hadPending = pendingAdvertisements.containsKey(address)
+            removePendingAdvertisementByAddressLocked(address)
+
+            val iterator = lastObservedAtByFingerprint.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (entry.key.address == address) {
+                    iterator.remove()
+                    removedObservedFingerprints += 1
+                }
+            }
+            hadPending
+        }
+
+        val removedDedup = synchronized(dedupLock) {
+            lastForwardedAdvertisementStateByAddress.remove(address) != null
+        }
+        val removedThrottle = synchronized(discoveryThrottleLock) {
+            discoveryThrottleStateByAddress.remove(address) != null
+        }
+
+        if (removedPending || removedObservedFingerprints > 0 || removedDedup || removedThrottle) {
+            log(
+                "Cleared advertisement runtime state for ${ProxyIdentity.longToMac(address)} " +
+                    "after $reason: pending=$removedPending, observed=$removedObservedFingerprints, " +
+                    "dedup=$removedDedup, throttle=$removedThrottle",
+            )
+        }
+    }
+
     private fun restartScannerForRecovery(reason: String, nowMs: Long): Boolean {
         if (nowMs - lastScannerRecoveryAtMs < MIN_SCANNER_RECOVERY_INTERVAL_MS) {
             return false
@@ -1395,6 +1435,7 @@ class EspHomeApiServer(
     )
 
     private data class AdvertisementFingerprint(
+        val address: Long,
         val payloadHash: Int,
         val payloadSize: Int,
         val addressType: Int,
@@ -1410,6 +1451,7 @@ class EspHomeApiServer(
 
     private fun RawAdvertisement.fingerprint(): AdvertisementFingerprint {
         return AdvertisementFingerprint(
+            address = address,
             payloadHash = data.contentHashCode(),
             payloadSize = data.size,
             addressType = addressType,
