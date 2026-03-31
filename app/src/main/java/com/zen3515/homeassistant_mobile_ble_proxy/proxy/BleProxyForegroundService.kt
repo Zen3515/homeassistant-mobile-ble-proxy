@@ -1,6 +1,7 @@
 package com.zen3515.homeassistant_mobile_ble_proxy.proxy
 
 import android.app.NotificationChannel
+import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
@@ -160,6 +161,9 @@ class BleProxyForegroundService : Service() {
                 apiServer?.onScannerStateChanged(state)
                 updateNotification("Scanner: ${state.name.lowercase()}")
             },
+            onProfileChanged = { profile ->
+                ProxyRuntimeState.setActiveScanProfile(profile)
+            },
             onError = { message ->
                 ProxyRuntimeState.setError(message)
                 logRuntime("Scanner error: $message")
@@ -169,6 +173,7 @@ class BleProxyForegroundService : Service() {
                 logRuntime("Scanner info: $message")
             },
         )
+        reconcileScannerProfile(reason = "startup")
 
         nsdAdvertiser = EspHomeNsdAdvertiser(
             context = applicationContext,
@@ -217,6 +222,8 @@ class BleProxyForegroundService : Service() {
         }.onFailure {
             started = false
             ProxyRuntimeState.setServiceRunning(false)
+            ProxyRuntimeState.setDesiredScanProfile(null)
+            ProxyRuntimeState.setActiveScanProfile(null)
             BleProxyTileService.onServiceRunningChanged(applicationContext, false)
             ProxyRuntimeState.setError("Failed to start proxy: ${it.message}")
             logRuntime("Failed to start proxy: ${it.message}")
@@ -248,6 +255,8 @@ class BleProxyForegroundService : Service() {
         ProxyRuntimeState.setServiceRunning(false)
         BleProxyTileService.onServiceRunningChanged(applicationContext, false)
         ProxyRuntimeState.setScannerState(RuntimeScannerState.IDLE)
+        ProxyRuntimeState.setDesiredScanProfile(null)
+        ProxyRuntimeState.setActiveScanProfile(null)
         unregisterScreenReceiver()
         releaseWakeLockIfHeld()
         logRuntime("Proxy stopped")
@@ -288,11 +297,11 @@ class BleProxyForegroundService : Service() {
                 val previousTargetFilters = previousSettings.managedTargetDevices
                 val currentTargetFilters = updatedSettings.managedTargetDevices
                 val targetsChanged = previousTargetFilters != currentTargetFilters
-                if (targetsChanged && !isScreenInteractive()) {
-                    val restarted = scanner?.restartForEnvironmentChange() ?: false
-                    if (restarted) {
-                        logRuntime("Restarted scanner to apply updated lock-screen scan targets")
-                    }
+                if (targetsChanged) {
+                    reconcileScannerProfile(
+                        reason = "managed_target_settings_updated",
+                        forceRestartIfSameProfile = true,
+                    )
                 }
             }
         }
@@ -342,25 +351,15 @@ class BleProxyForegroundService : Service() {
                     Intent.ACTION_SCREEN_OFF -> {
                         acquireWakeLockIfNeeded()
                         logRuntime("Screen turned off; ensured partial WakeLock is held")
-                        val scanner = scannerEngine ?: return
-                        if (scanner.hasPlatformEligibleManagedTargetDevices()) {
-                            val restarted = scanner.restartForEnvironmentChange()
-                            if (restarted) {
-                                logRuntime("Restarted scanner to apply lock-screen scan targets")
-                            }
-                        } else {
-                            logRuntime("No exact lock-screen scan targets configured; Android may stop broad BLE scanning while locked")
-                        }
+                        reconcileScannerProfile(reason = "screen_off")
                     }
                     Intent.ACTION_SCREEN_ON -> {
                         logRuntime("Screen turned on")
-                        val scanner = scannerEngine ?: return
-                        if (scanner.hasPlatformEligibleManagedTargetDevices()) {
-                            val restarted = scanner.restartForEnvironmentChange()
-                            if (restarted) {
-                                logRuntime("Restarted scanner to resume broad foreground scanning")
-                            }
-                        }
+                        reconcileScannerProfile(reason = "screen_on")
+                    }
+                    Intent.ACTION_USER_PRESENT -> {
+                        logRuntime("User present")
+                        reconcileScannerProfile(reason = "user_present")
                     }
                 }
             }
@@ -368,6 +367,7 @@ class BleProxyForegroundService : Service() {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED)
@@ -394,6 +394,69 @@ class BleProxyForegroundService : Service() {
     private fun isScreenInteractive(): Boolean {
         val powerManager = getSystemService(PowerManager::class.java) ?: return true
         return powerManager.isInteractive
+    }
+
+    private fun isKeyguardLocked(): Boolean {
+        val keyguardManager = getSystemService(KeyguardManager::class.java) ?: return false
+        return keyguardManager.isKeyguardLocked
+    }
+
+    private fun platformEligibleLockScreenTargetCount(): Int {
+        return BluetoothScanEngine.platformEligibleTargetCount(currentSettings.managedTargetDevices)
+    }
+
+    private fun computeDesiredScanProfile(): ScanProfile {
+        val interactive = isScreenInteractive()
+        val keyguardLocked = isKeyguardLocked()
+        val eligibleTargetCount = platformEligibleLockScreenTargetCount()
+        return if (interactive && !keyguardLocked) {
+            ScanProfile.UNLOCKED_BROAD
+        } else if (eligibleTargetCount > 0) {
+            ScanProfile.LOCKED_TARGETED
+        } else {
+            ScanProfile.LOCKED_BROAD_FALLBACK
+        }
+    }
+
+    private fun reconcileScannerProfile(
+        reason: String,
+        forceRestartIfSameProfile: Boolean = false,
+    ) {
+        val scanner = scannerEngine ?: return
+        val interactive = isScreenInteractive()
+        val keyguardLocked = isKeyguardLocked()
+        val targetFilters = platformEligibleLockScreenTargetCount()
+        val desiredProfile = computeDesiredScanProfile()
+        val currentProfile = scanner.currentProfile()
+        val shouldForceRestart =
+            forceRestartIfSameProfile &&
+                scanner.isRunning() &&
+                desiredProfile == currentProfile &&
+                desiredProfile == ScanProfile.LOCKED_TARGETED
+
+        ProxyRuntimeState.setDesiredScanProfile(desiredProfile)
+
+        logRuntime(
+            "Scanner profile reconcile: reason=$reason interactive=${if (interactive) "on" else "off"} " +
+                "keyguard_locked=$keyguardLocked target_filters=$targetFilters old=${currentProfile.name} " +
+                "new=${desiredProfile.name} running=${scanner.isRunning()} force_restart=$shouldForceRestart",
+        )
+
+        val profileChanged = currentProfile != desiredProfile
+        if (!profileChanged && !shouldForceRestart) {
+            return
+        }
+
+        val restarted = scanner.restartForProfile(desiredProfile)
+        if (scanner.isRunning()) {
+            if (restarted) {
+                logRuntime("Restarted scanner for profile ${desiredProfile.name} (reason=$reason)")
+            } else {
+                logRuntime("Scanner restart for profile ${desiredProfile.name} did not complete (reason=$reason)")
+            }
+        } else {
+            logRuntime("Stored scanner profile ${desiredProfile.name} for next scanner start (reason=$reason)")
+        }
     }
 
     private fun handleMatchedAdvertisementForLockScreenTargets(advertisement: RawAdvertisement) {
@@ -431,12 +494,10 @@ class BleProxyForegroundService : Service() {
                 ProxyIdentity.longToMac(advertisement.address) +
                 advertisement.name?.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty(),
         )
-        if (!isScreenInteractive()) {
-            val restarted = scannerEngine?.restartForEnvironmentChange() ?: false
-            if (restarted) {
-                logRuntime("Restarted scanner after auto-adding lock-screen scan target")
-            }
-        }
+        reconcileScannerProfile(
+            reason = "auto_added_lock_screen_target",
+            forceRestartIfSameProfile = true,
+        )
         scope.launch {
             settingsRepository.save(updatedSettings)
         }
@@ -510,7 +571,7 @@ class BleProxyForegroundService : Service() {
 
     companion object {
         private const val NOTIFICATION_CHANNEL_ID = "ble_proxy_channel"
-        private const val NOTIFICATION_ID = 1100
+        internal const val NOTIFICATION_ID = 1100
         private const val SCANNER_STALL_TIMEOUT_MS = 45_000L
         private const val WAKE_LOCK_TIMEOUT_MS = 30 * 60 * 1000L
         private const val WAKE_LOCK_RENEWAL_INTERVAL_MS = 5 * 60 * 1000L

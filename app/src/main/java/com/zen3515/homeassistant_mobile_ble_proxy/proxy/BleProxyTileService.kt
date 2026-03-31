@@ -23,24 +23,27 @@ class BleProxyTileService : TileService() {
         super.onClick()
 
         val context = applicationContext
-        val currentlyRunning = ProxyQuickSettingsTileStateStore.isServiceRunning(context)
+        val currentlyRunning = resolveServiceRunning(context)
+        val locked = isLocked
         if (currentlyRunning) {
+            ProxyRuntimeState.appendLog("Tile stop requested while ${if (locked) "locked" else "unlocked"}")
             ProxyServiceController.stop(context)
             updateTileState(
-                isRunning = false,
+                isRunning = true,
                 secondaryLabel = getString(R.string.qs_tile_status_stopping),
             )
         } else {
+            ProxyRuntimeState.appendLog("Tile start requested while ${if (locked) "locked" else "unlocked"}")
             ProxyServiceController.start(context)
             updateTileState(
-                isRunning = true,
+                isRunning = false,
                 secondaryLabel = getString(R.string.qs_tile_status_starting),
             )
         }
     }
 
     private fun refreshTile() {
-        val running = ProxyQuickSettingsTileStateStore.isServiceRunning(applicationContext)
+        val running = resolveServiceRunning(applicationContext)
         updateTileState(
             isRunning = running,
             secondaryLabel = getString(
@@ -66,6 +69,16 @@ class BleProxyTileService : TileService() {
         }
         tile.contentDescription = "$label, $secondaryLabel"
         tile.updateTile()
+    }
+
+    private fun resolveServiceRunning(context: Context): Boolean {
+        val actualRunning = ProxyServiceController.isActuallyRunning(context)
+        val runtimeRunning = ProxyRuntimeState.state.value.serviceRunning
+        val resolvedRunning = actualRunning || runtimeRunning
+        if (ProxyQuickSettingsTileStateStore.isServiceRunning(context) != resolvedRunning) {
+            ProxyQuickSettingsTileStateStore.setServiceRunning(context, resolvedRunning)
+        }
+        return resolvedRunning
     }
 
     companion object {

@@ -75,6 +75,8 @@ import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyIdentity
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyRuntimeSnapshot
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxySettings
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxySettingsJsonCodec
+import com.zen3515.homeassistant_mobile_ble_proxy.proxy.RuntimeScannerState
+import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ScanProfile
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ScannerMode
 import com.zen3515.homeassistant_mobile_ble_proxy.ui.theme.HaMobileBleProxyTheme
 import java.io.IOException
@@ -436,6 +438,14 @@ private fun HomeScreen(
                     )
                     Text("Clients: ${uiState.runtime.clientCount}")
                     Text("Scanner: ${uiState.runtime.scannerState.name.lowercase()}")
+                    Text(
+                        "Desired profile: " +
+                            (uiState.runtime.desiredScanProfile?.name?.lowercase()?.replace('_', '-') ?: "none"),
+                    )
+                    Text(
+                        "Active profile: " +
+                            (uiState.runtime.activeScanProfile?.name?.lowercase()?.replace('_', '-') ?: "none"),
+                    )
                     Text("Advertisements forwarded: ${uiState.runtime.advertisementsForwarded}")
                     uiState.runtime.lastError?.let {
                         Text(it, color = MaterialTheme.colorScheme.error)
@@ -1866,6 +1876,9 @@ private fun ProxyScreenPreview() {
                 ),
                 runtime = ProxyRuntimeSnapshot(
                     serviceRunning = true,
+                    scannerState = RuntimeScannerState.RUNNING,
+                    desiredScanProfile = ScanProfile.UNLOCKED_BROAD,
+                    activeScanProfile = ScanProfile.UNLOCKED_BROAD,
                     clientCount = 1,
                     advertisementsForwarded = 128,
                     listeningPort = 6053,

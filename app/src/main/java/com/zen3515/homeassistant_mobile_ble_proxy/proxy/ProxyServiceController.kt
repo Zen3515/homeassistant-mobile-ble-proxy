@@ -1,5 +1,7 @@
 package com.zen3515.homeassistant_mobile_ble_proxy.proxy
 
+import android.app.NotificationManager
+import android.os.Build
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
@@ -20,5 +22,15 @@ object ProxyServiceController {
             action = ACTION_STOP
         }
         ContextCompat.startForegroundService(context, intent)
+    }
+
+    fun isActuallyRunning(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return ProxyQuickSettingsTileStateStore.isServiceRunning(context)
+        }
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+        return manager.activeNotifications.any { notification ->
+            notification.id == BleProxyForegroundService.NOTIFICATION_ID
+        }
     }
 }

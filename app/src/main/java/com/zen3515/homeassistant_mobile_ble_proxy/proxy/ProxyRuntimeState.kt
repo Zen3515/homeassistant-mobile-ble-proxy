@@ -19,6 +19,8 @@ enum class RuntimeScannerState {
 data class ProxyRuntimeSnapshot(
     val serviceRunning: Boolean = false,
     val scannerState: RuntimeScannerState = RuntimeScannerState.IDLE,
+    val desiredScanProfile: ScanProfile? = null,
+    val activeScanProfile: ScanProfile? = null,
     val clientCount: Int = 0,
     val advertisementsForwarded: Long = 0,
     val listeningPort: Int = 0,
@@ -46,6 +48,14 @@ object ProxyRuntimeState {
 
     fun setScannerState(state: RuntimeScannerState) {
         update { it.copy(scannerState = state) }
+    }
+
+    fun setDesiredScanProfile(profile: ScanProfile?) {
+        update { it.copy(desiredScanProfile = profile) }
+    }
+
+    fun setActiveScanProfile(profile: ScanProfile?) {
+        update { it.copy(activeScanProfile = profile) }
     }
 
     fun setClientCount(count: Int) {
@@ -84,6 +94,8 @@ object ProxyRuntimeState {
                 advertisementsForwarded = 0,
                 clientCount = 0,
                 scannerState = RuntimeScannerState.IDLE,
+                desiredScanProfile = null,
+                activeScanProfile = null,
                 lastError = null,
             )
         }

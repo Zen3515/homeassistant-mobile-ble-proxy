@@ -12,7 +12,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.location.LocationManager
-import android.os.PowerManager
 import androidx.core.content.ContextCompat
 import androidx.core.location.LocationManagerCompat
 import java.io.ByteArrayOutputStream
@@ -57,12 +56,12 @@ class BluetoothScanEngine(
     managedTargetDevices: List<ManagedTargetDevice>,
     private val onAdvertisement: (RawAdvertisement) -> Unit,
     private val onStateChanged: (RuntimeScannerState) -> Unit,
+    private val onProfileChanged: (ScanProfile?) -> Unit = {},
     private val onError: (String) -> Unit,
     private val onLog: (String) -> Unit = {},
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val bluetoothManager: BluetoothManager = context.getSystemService(BluetoothManager::class.java)
-    private val powerManager: PowerManager? = context.getSystemService(PowerManager::class.java)
     private val adapter: BluetoothAdapter?
         get() = bluetoothManager.adapter
 
@@ -84,6 +83,10 @@ class BluetoothScanEngine(
     private var retryJob: Job? = null
     private var currentMode: ScannerMode = ScannerMode.PASSIVE
     @Volatile
+    private var configuredProfile: ScanProfile = ScanProfile.UNLOCKED_BROAD
+    @Volatile
+    private var activeProfile: ScanProfile? = null
+    @Volatile
     private var lastFilterDescription: String = "broad"
     private var managedTargetDevices: List<ManagedTargetDevice> = managedTargetDevices
 
@@ -101,6 +104,7 @@ class BluetoothScanEngine(
         override fun onScanFailed(errorCode: Int) {
             running = false
             scanner = null
+            setActiveProfile(null)
             onStateChanged(RuntimeScannerState.FAILED)
             val failureName = scanFailureName(errorCode)
             onError("BLE scan failed with code $errorCode ($failureName)")
@@ -132,7 +136,7 @@ class BluetoothScanEngine(
         currentMode = mode
         if (shouldRestart) {
             stop()
-            start(mode)
+            start(configuredProfile, mode)
         }
     }
 
@@ -143,22 +147,37 @@ class BluetoothScanEngine(
     }
 
     fun hasPlatformEligibleManagedTargetDevices(): Boolean {
-        return buildPlatformScanFilters(currentManagedTargetDevices()).isNotEmpty()
+        return platformEligibleTargetCount(currentManagedTargetDevices()) > 0
     }
 
-    fun restartForEnvironmentChange(): Boolean {
+    fun isRunning(): Boolean = running
+
+    fun currentProfile(): ScanProfile = activeProfile ?: configuredProfile
+
+    private fun setActiveProfile(profile: ScanProfile?) {
+        activeProfile = profile
+        onProfileChanged(profile)
+    }
+
+    fun restartForProfile(profile: ScanProfile): Boolean {
+        configuredProfile = profile
         if (!running) {
             return false
         }
         stop()
-        return start(currentMode)
+        return start(profile, currentMode)
     }
 
     fun start(mode: ScannerMode = currentMode): Boolean {
-        return startInternal(mode, fromRetry = false)
+        return start(configuredProfile, mode)
     }
 
-    private fun startInternal(mode: ScannerMode, fromRetry: Boolean): Boolean {
+    fun start(profile: ScanProfile, mode: ScannerMode = currentMode): Boolean {
+        return startInternal(profile = profile, mode = mode, fromRetry = false)
+    }
+
+    private fun startInternal(profile: ScanProfile, mode: ScannerMode, fromRetry: Boolean): Boolean {
+        configuredProfile = profile
         currentMode = mode
         shouldRun = true
         if (!fromRetry) {
@@ -201,11 +220,11 @@ class BluetoothScanEngine(
         }
 
         val settings = buildScanSettings(mode)
-        val interactive = isDeviceInteractive()
-        val platformScanFilters = if (interactive) {
-            emptyList()
-        } else {
-            buildPlatformScanFilters(currentManagedTargetDevices())
+        val platformScanFilters = when (profile) {
+            ScanProfile.UNLOCKED_BROAD,
+            ScanProfile.LOCKED_BROAD_FALLBACK,
+            -> emptyList()
+            ScanProfile.LOCKED_TARGETED -> buildPlatformScanFilters(currentManagedTargetDevices())
         }
         val filters = platformScanFilters.ifEmpty { null }
 
@@ -216,25 +235,40 @@ class BluetoothScanEngine(
                 ScannerMode.ACTIVE -> "low_latency"
             }
             lastFilterDescription = when {
-                interactive -> "broad"
-                filters == null -> "screen-off broad"
-                else -> "screen-off targeted"
+                profile == ScanProfile.UNLOCKED_BROAD -> "unlocked-broad"
+                profile == ScanProfile.LOCKED_TARGETED -> "locked-targeted"
+                else -> "locked-broad-fallback"
             }
             onLog(
-                "BLE scan profile: interactive=${if (interactive) "on" else "off"}, " +
+                "BLE scan profile: profile=${profile.name}, " +
                     "mode=${mode.name.lowercase()}, scan_mode=$scanModeLabel, filter_mode=$lastFilterDescription",
             )
-            if (interactive) {
-                onLog("BLE scan using broad discovery because the screen is on")
-            } else if (filters == null) {
-                onLog("BLE scan has no platform-eligible managed target; Android may stop it when the screen turns off")
-            } else {
-                onLog("BLE scan using ${filters.size} managed target platform filter(s)")
+            when (profile) {
+                ScanProfile.UNLOCKED_BROAD -> {
+                    onLog("BLE scan using broad discovery in unlocked foreground profile")
+                }
+                ScanProfile.LOCKED_TARGETED -> {
+                    if (filters == null) {
+                        onLog("BLE scan requested locked targeted profile without platform-eligible managed targets; falling back to broad scan")
+                    } else {
+                        onLog("BLE scan using ${filters.size} managed target platform filter(s)")
+                    }
+                }
+                ScanProfile.LOCKED_BROAD_FALLBACK -> {
+                    onLog("BLE scan running in locked broad fallback; Android may suppress broad scanning while locked")
+                }
             }
             localScanner.startScan(filters, settings, callback)
             onLog("BLE scan started with callback delivery")
             scanner = localScanner
             running = true
+            setActiveProfile(
+                if (profile == ScanProfile.LOCKED_TARGETED && filters == null) {
+                    ScanProfile.LOCKED_BROAD_FALLBACK
+                } else {
+                    profile
+                },
+            )
             retryAttempt = 0
             onStateChanged(RuntimeScannerState.RUNNING)
             if (fromRetry) {
@@ -244,6 +278,7 @@ class BluetoothScanEngine(
         }.getOrElse {
             running = false
             scanner = null
+            setActiveProfile(null)
             onStateChanged(RuntimeScannerState.FAILED)
             val detail = it.message ?: it.javaClass.simpleName
             onError("Failed to start BLE scan: $detail")
@@ -258,6 +293,7 @@ class BluetoothScanEngine(
         cancelPendingRetry()
         if (!running) {
             scanner = null
+            setActiveProfile(null)
             onStateChanged(RuntimeScannerState.STOPPED)
             return
         }
@@ -280,6 +316,7 @@ class BluetoothScanEngine(
 
         scanner = null
         running = false
+        setActiveProfile(null)
         onStateChanged(RuntimeScannerState.STOPPED)
     }
 
@@ -312,7 +349,7 @@ class BluetoothScanEngine(
                 if (!shouldRun || running) {
                     return@launch
                 }
-                startInternal(currentMode, fromRetry = true)
+                startInternal(profile = configuredProfile, mode = currentMode, fromRetry = true)
             }
         }
     }
@@ -342,10 +379,6 @@ class BluetoothScanEngine(
     private fun isLocationServiceEnabled(): Boolean {
         val manager = context.getSystemService(LocationManager::class.java) ?: return false
         return LocationManagerCompat.isLocationEnabled(manager)
-    }
-
-    private fun isDeviceInteractive(): Boolean {
-        return powerManager?.isInteractive ?: true
     }
 
     private fun buildScanSettings(mode: ScannerMode): ScanSettings {
@@ -423,6 +456,23 @@ class BluetoothScanEngine(
     }
 
     companion object {
+        fun platformEligibleTargetCount(targets: List<ManagedTargetDevice>): Int {
+            return targets
+                .asSequence()
+                .filter { it.enableLockScreenScan }
+                .mapNotNull { target ->
+                    val exactMac = ProxyIdentity.normalizeMacAddress(target.macAddress)
+                    val exactName = target.name.trim().ifEmpty { null }
+                    if (exactMac == null && exactName == null) {
+                        null
+                    } else {
+                        "${exactMac.orEmpty()}|${exactName.orEmpty()}"
+                    }
+                }
+                .distinct()
+                .count()
+        }
+
         private const val MAX_RAW_ADVERTISEMENT_LENGTH = 62
         private const val SCAN_FAILED_RETRY_DELAY_MS = 5_000L
         private const val START_SCAN_FAILED_ERROR_CODE = -1
