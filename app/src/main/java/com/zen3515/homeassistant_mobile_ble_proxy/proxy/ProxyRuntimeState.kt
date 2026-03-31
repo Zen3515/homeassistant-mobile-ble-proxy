@@ -46,6 +46,19 @@ object ProxyRuntimeState {
         }
     }
 
+    fun reconcileObservedServiceRunning(running: Boolean) {
+        update { current ->
+            if (current.serviceRunning == running) {
+                current
+            } else {
+                current.copy(
+                    serviceRunning = running,
+                    listeningPort = if (running) current.listeningPort else 0,
+                )
+            }
+        }
+    }
+
     fun setScannerState(state: RuntimeScannerState) {
         update { it.copy(scannerState = state) }
     }

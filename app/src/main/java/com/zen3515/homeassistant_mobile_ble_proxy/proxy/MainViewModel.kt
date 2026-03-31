@@ -40,6 +40,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         MainUiState(settings = initialSettings),
     )
 
+    init {
+        refreshServiceRunningState()
+    }
+
     fun saveSettings(settings: ProxySettings) {
         val sanitizedNodeName = settings.nodeName
             .filter { it.isLetterOrDigit() || it == '_' || it == '-' }
@@ -117,6 +121,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             ProxyServiceController.stop(appContext)
         }
+    }
+
+    fun refreshServiceRunningState() {
+        ProxyServiceController.reconcileObservedRunning(appContext)
     }
 
     fun clearRuntimeLogs() {

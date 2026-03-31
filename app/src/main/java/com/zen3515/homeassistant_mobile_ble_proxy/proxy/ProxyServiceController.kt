@@ -25,12 +25,25 @@ object ProxyServiceController {
     }
 
     fun isActuallyRunning(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return ProxyQuickSettingsTileStateStore.isServiceRunning(context)
+        return runCatching {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                return@runCatching ProxyQuickSettingsTileStateStore.isServiceRunning(context)
+            }
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return@runCatching false
+            manager.activeNotifications.any { notification ->
+                notification.id == BleProxyForegroundService.NOTIFICATION_ID
+            }
+        }.getOrElse {
+            ProxyQuickSettingsTileStateStore.isServiceRunning(context)
         }
-        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
-        return manager.activeNotifications.any { notification ->
-            notification.id == BleProxyForegroundService.NOTIFICATION_ID
+    }
+
+    fun reconcileObservedRunning(context: Context): Boolean {
+        val running = isActuallyRunning(context)
+        if (ProxyQuickSettingsTileStateStore.isServiceRunning(context) != running) {
+            ProxyQuickSettingsTileStateStore.setServiceRunning(context, running)
         }
+        ProxyRuntimeState.reconcileObservedServiceRunning(running)
+        return running
     }
 }

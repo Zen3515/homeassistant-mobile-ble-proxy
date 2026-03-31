@@ -102,6 +102,11 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.refreshServiceRunningState()
+    }
 }
 
 private enum class ProxyPage {

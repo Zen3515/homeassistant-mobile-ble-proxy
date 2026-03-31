@@ -72,13 +72,7 @@ class BleProxyTileService : TileService() {
     }
 
     private fun resolveServiceRunning(context: Context): Boolean {
-        val actualRunning = ProxyServiceController.isActuallyRunning(context)
-        val runtimeRunning = ProxyRuntimeState.state.value.serviceRunning
-        val resolvedRunning = actualRunning || runtimeRunning
-        if (ProxyQuickSettingsTileStateStore.isServiceRunning(context) != resolvedRunning) {
-            ProxyQuickSettingsTileStateStore.setServiceRunning(context, resolvedRunning)
-        }
-        return resolvedRunning
+        return ProxyServiceController.reconcileObservedRunning(context)
     }
 
     companion object {
