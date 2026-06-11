@@ -1,10 +1,14 @@
 package com.zen3515.homeassistant_mobile_ble_proxy.proxy
 
+import android.annotation.SuppressLint
+import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
+import com.zen3515.homeassistant_mobile_ble_proxy.MainActivity
 import com.zen3515.homeassistant_mobile_ble_proxy.R
 
 class BleProxyTileService : TileService() {
@@ -25,20 +29,24 @@ class BleProxyTileService : TileService() {
         val context = applicationContext
         val currentlyRunning = resolveServiceRunning(context)
         val locked = isLocked
-        if (currentlyRunning) {
-            ProxyRuntimeState.appendLog("Tile stop requested while ${if (locked) "locked" else "unlocked"}")
-            ProxyServiceController.stop(context)
-            updateTileState(
-                isRunning = true,
-                secondaryLabel = getString(R.string.qs_tile_status_stopping),
-            )
-        } else {
-            ProxyRuntimeState.appendLog("Tile start requested while ${if (locked) "locked" else "unlocked"}")
-            ProxyServiceController.start(context)
-            updateTileState(
-                isRunning = false,
-                secondaryLabel = getString(R.string.qs_tile_status_starting),
-            )
+        when (BleProxyTileClickPolicy.actionForServiceRunning(currentlyRunning)) {
+            BleProxyTileClickAction.STOP_PROXY -> {
+                ProxyRuntimeState.appendLog("Tile stop requested while ${if (locked) "locked" else "unlocked"}")
+                ProxyServiceController.stop(context)
+                updateTileState(
+                    isRunning = true,
+                    secondaryLabel = getString(R.string.qs_tile_status_stopping),
+                )
+            }
+
+            BleProxyTileClickAction.OPEN_APP_AND_START_PROXY -> {
+                ProxyRuntimeState.appendLog("Tile app-open start requested while ${if (locked) "locked" else "unlocked"}")
+                openAppAndRequestStart()
+                updateTileState(
+                    isRunning = false,
+                    secondaryLabel = getString(R.string.qs_tile_status_opening),
+                )
+            }
         }
     }
 
@@ -75,7 +83,32 @@ class BleProxyTileService : TileService() {
         return ProxyServiceController.reconcileObservedRunning(context)
     }
 
+    @SuppressLint("StartActivityAndCollapseDeprecated")
+    private fun openAppAndRequestStart() {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            action = ProxyLaunchContract.ACTION_OPEN_AND_START_PROXY
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val pendingIntent = PendingIntent.getActivity(
+                this,
+                TILE_START_REQUEST_CODE,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            startActivityAndCollapse(pendingIntent)
+        } else {
+            @Suppress("DEPRECATION")
+            startActivityAndCollapse(intent)
+        }
+    }
+
     companion object {
+        private const val TILE_START_REQUEST_CODE = 10_053
+
         fun onServiceRunningChanged(context: Context, running: Boolean) {
             ProxyQuickSettingsTileStateStore.setServiceRunning(context, running)
             requestRefresh(context)

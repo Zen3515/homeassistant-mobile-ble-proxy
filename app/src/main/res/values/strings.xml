@@ -8,6 +8,7 @@
     <string name="qs_tile_label">BLE Proxy</string>
     <string name="qs_tile_status_running">Running</string>
     <string name="qs_tile_status_stopped">Stopped</string>
+    <string name="qs_tile_status_opening">Opening app…</string>
     <string name="qs_tile_status_starting">Starting…</string>
     <string name="qs_tile_status_stopping">Stopping…</string>
 </resources>

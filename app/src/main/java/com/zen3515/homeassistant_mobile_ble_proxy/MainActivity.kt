@@ -72,7 +72,9 @@ import com.zen3515.homeassistant_mobile_ble_proxy.proxy.MainUiState
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.MainViewModel
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.NsdInterfaceMode
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyIdentity
+import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyLaunchContract
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyRuntimeSnapshot
+import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyRuntimeState
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxySettings
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxySettingsJsonCodec
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.RuntimeScannerState
@@ -101,11 +103,32 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+        consumeProxyLaunchRequest(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        consumeProxyLaunchRequest(intent)
     }
 
     override fun onResume() {
         super.onResume()
         viewModel.refreshServiceRunningState()
+    }
+
+    private fun consumeProxyLaunchRequest(incomingIntent: Intent?) {
+        if (!ProxyLaunchContract.shouldStartProxy(incomingIntent?.action)) {
+            return
+        }
+
+        ProxyRuntimeState.appendLog("App opened from tile; starting proxy")
+        viewModel.setProxyEnabled(true)
+        setIntent(
+            Intent(this, MainActivity::class.java).apply {
+                action = Intent.ACTION_MAIN
+            },
+        )
     }
 }
 
