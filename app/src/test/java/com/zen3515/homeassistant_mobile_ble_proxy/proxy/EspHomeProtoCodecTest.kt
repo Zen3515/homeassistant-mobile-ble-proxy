@@ -25,6 +25,11 @@ class EspHomeProtoCodecTest {
     }
 
     @Test
+    fun `parseScannerMode treats absent mode as passive proto default`() {
+        assertEquals(ScannerMode.PASSIVE, EspHomeProtoCodec.parseScannerMode(ByteArray(0)))
+    }
+
+    @Test
     fun `parseScannerMode rejects unknown enum`() {
         val unknownPayload = encodeProto { writeEnum(1, 7) }
         assertNull(EspHomeProtoCodec.parseScannerMode(unknownPayload))

@@ -118,7 +118,7 @@ object EspHomeProtoCodec {
     }
 
     fun parseScannerMode(payload: ByteArray): ScannerMode? {
-        var modeValue: Int? = null
+        var modeValue = 0
         val ok = parse(payload) { input, fieldNumber, tag ->
             when (fieldNumber) {
                 1 -> modeValue = input.readEnum()
