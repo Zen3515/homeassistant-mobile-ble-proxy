@@ -39,6 +39,7 @@ class BleProxyForegroundService : Service() {
 
     private var currentSettings = ProxySettings()
     private var macAddress: String = "00:00:00:00:00:00"
+    private var listeningPort: Int = 0
 
     private var scannerEngine: BluetoothScanEngine? = null
     private var apiServer: EspHomeApiServer? = null
@@ -142,6 +143,7 @@ class BleProxyForegroundService : Service() {
                 "watchdog_interval=${currentSettings.scannerHealthCheckIntervalMs}ms, " +
                 "low_rate_checks=${currentSettings.scannerLowRateConsecutiveChecks}, " +
                 "nsd=${currentSettings.nsdInterfaceMode.name.lowercase()}, " +
+                "nsd_order=${currentSettings.nsdTransportOrder.joinToString(">") { it.name.lowercase() }}, " +
                 "filters=${if (enabledFilterCount == 0) "allow-all" else "$enabledFilterCount"}, " +
                 "lock_targets=${currentSettings.managedTargetDevices.size}, " +
                 "auto_add=${if (currentSettings.autoAddMatchedDevicesToLockScreenTargets) "on" else "off"}, " +
@@ -212,6 +214,7 @@ class BleProxyForegroundService : Service() {
             )
             val port = server.start()
             apiServer = server
+            listeningPort = port
             nsdAdvertiser?.register(currentSettings, macAddress, port)
             ProxyRuntimeState.setServiceRunning(true, port)
             BleProxyTileService.onServiceRunningChanged(applicationContext, true)
@@ -247,6 +250,7 @@ class BleProxyForegroundService : Service() {
 
         apiServer?.stop()
         apiServer = null
+        listeningPort = 0
 
         nsdAdvertiser?.shutdown()
         nsdAdvertiser = null
@@ -302,6 +306,19 @@ class BleProxyForegroundService : Service() {
                         reason = "managed_target_settings_updated",
                         forceRestartIfSameProfile = true,
                     )
+                }
+
+                val nsdSettingsChanged = previousSettings.nodeName != updatedSettings.nodeName ||
+                    previousSettings.nsdInterfaceMode != updatedSettings.nsdInterfaceMode ||
+                    previousSettings.nsdTransportOrder != updatedSettings.nsdTransportOrder
+                val port = listeningPort
+                if (nsdSettingsChanged && port > 0) {
+                    logRuntime(
+                        "mDNS settings updated; re-registering " +
+                            "(mode=${updatedSettings.nsdInterfaceMode.name.lowercase()}, " +
+                            "order=${updatedSettings.nsdTransportOrder.joinToString(">") { it.name.lowercase() }})",
+                    )
+                    nsdAdvertiser?.register(updatedSettings, macAddress, port)
                 }
             }
         }

@@ -71,6 +71,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             advertisementDiscoveryThrottleIntervalMs = settings.advertisementDiscoveryThrottleIntervalMs.coerceIn(0, 3_600_000),
             scannerHealthCheckIntervalMs = settings.scannerHealthCheckIntervalMs.coerceIn(5_000, 120_000),
             scannerLowRateConsecutiveChecks = settings.scannerLowRateConsecutiveChecks.coerceIn(1, 12),
+            nsdInterfaceMode = if (settings.nsdInterfaceMode == NsdInterfaceMode.VPN) {
+                NsdInterfaceMode.PREFERRED
+            } else {
+                settings.nsdInterfaceMode
+            },
+            nsdTransportOrder = NsdAdvertiseDefaults.sanitizeTransportOrder(settings.nsdTransportOrder),
             advertisementFilters = settings.advertisementFilters.map { rule ->
                 rule.copy(
                     id = rule.id.ifBlank { UUID.randomUUID().toString() },

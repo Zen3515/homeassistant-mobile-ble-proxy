@@ -2,8 +2,11 @@ package com.zen3515.homeassistant_mobile_ble_proxy.proxy
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.Build
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.net.DatagramPacket
@@ -30,7 +33,14 @@ class EspHomeNsdAdvertiser(
     private val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var announcerJob: Job? = null
+    private var endpointRefreshJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var currentRegistration: AdvertisementRegistration? = null
+    private var activeEndpoint: SelectedEndpoint? = null
+    private var activeGoodbyePacket: ByteArray? = null
+    private var activeMulticastAddress: InetAddress? = null
     private var activeSocket: MulticastSocket? = null
+    private var announcementGeneration: Long = 0
 
     @Synchronized
     fun register(settings: ProxySettings, macAddress: String, port: Int) {
@@ -40,13 +50,68 @@ class EspHomeNsdAdvertiser(
             return
         }
 
-        val endpoint = selectEndpoint(settings.nsdInterfaceMode) ?: return
+        currentRegistration = AdvertisementRegistration(settings, macAddress, port)
+        registerNetworkCallbackLocked()
+        refreshEndpointLocked(reason = "startup")
+    }
+
+    @Synchronized
+    fun unregister() {
+        val callback = networkCallback
+        networkCallback = null
+        if (callback != null) {
+            runCatching {
+                connectivityManager?.unregisterNetworkCallback(callback)
+            }.onFailure { error ->
+                onLog("mDNS network callback unregister failed: ${error.message}")
+            }
+        }
+        endpointRefreshJob?.cancel()
+        endpointRefreshJob = null
+        currentRegistration = null
+        stopActiveAnnouncementLocked()
+    }
+
+    fun shutdown() {
+        unregister()
+        scope.cancel()
+    }
+
+    @Synchronized
+    private fun refreshEndpointLocked(reason: String) {
+        val registration = currentRegistration ?: return
+        val settings = registration.settings
+        val endpoint = selectEndpoint(
+            mode = settings.nsdInterfaceMode,
+            transportOrder = settings.nsdTransportOrder,
+        )
+        if (endpoint == null) {
+            if (activeEndpoint != null) {
+                onLog("mDNS endpoint unavailable after $reason; stopping current announcement")
+                stopActiveAnnouncementLocked()
+            }
+            return
+        }
+
+        if (endpoint == activeEndpoint) {
+            return
+        }
+
+        if (activeEndpoint != null) {
+            onLog(
+                "mDNS endpoint changed after $reason: " +
+                    "${activeEndpoint?.transportLabel}/${activeEndpoint?.ipv4Address?.hostAddress} -> " +
+                    "${endpoint.transportLabel}/${endpoint.ipv4Address.hostAddress}",
+            )
+        }
+        stopActiveAnnouncementLocked()
+
         val serviceName = ProxyIdentity.sanitizeServiceName(settings.nodeName)
         val hostName = "$serviceName.local"
         val instanceName = "$serviceName.$ESPHOME_SERVICE_TYPE"
         val txtAttributes = linkedMapOf(
             "version" to "2026.3.0",
-            "mac" to macAddress,
+            "mac" to registration.macAddress,
             "platform" to "ESP32",
             "board" to "android",
             "network" to endpoint.transportLabel,
@@ -58,7 +123,7 @@ class EspHomeNsdAdvertiser(
         val announcePacket = buildAnnouncementPacket(
             instanceName = instanceName,
             hostName = hostName,
-            port = port,
+            port = registration.port,
             address = endpoint.ipv4Address,
             txtAttributes = txtAttributes,
             ttlSeconds = RECORD_TTL_SECONDS,
@@ -66,7 +131,7 @@ class EspHomeNsdAdvertiser(
         val goodbyePacket = buildAnnouncementPacket(
             instanceName = instanceName,
             hostName = hostName,
-            port = port,
+            port = registration.port,
             address = endpoint.ipv4Address,
             txtAttributes = txtAttributes,
             ttlSeconds = 0,
@@ -80,11 +145,12 @@ class EspHomeNsdAdvertiser(
 
         onLog(
             "mDNS interface mode: ${settings.nsdInterfaceMode.name.lowercase()} " +
-                "(network=${endpoint.network}, ip=${endpoint.ipv4Address.hostAddress}, transport=${endpoint.transportLabel})",
+                "(order=${settings.nsdTransportOrder.joinToString(">") { it.name.lowercase() }}, " +
+                "network=${endpoint.network}, ip=${endpoint.ipv4Address.hostAddress}, transport=${endpoint.transportLabel})",
         )
         onLog(
             "mDNS registration attempt " +
-                "(service=$serviceName, type=$ESPHOME_SERVICE_TYPE, port=$port)",
+                "(service=$serviceName, type=$ESPHOME_SERVICE_TYPE, port=${registration.port})",
         )
         startAnnouncer(
             endpoint = endpoint,
@@ -92,26 +158,8 @@ class EspHomeNsdAdvertiser(
             goodbyePacket = goodbyePacket,
             multicastAddress = multicastAddress,
             instanceName = instanceName,
-            servicePort = port,
+            servicePort = registration.port,
         )
-    }
-
-    @Synchronized
-    fun unregister() {
-        val job = announcerJob
-        announcerJob = null
-        job?.cancel()
-        runCatching {
-            activeSocket?.close()
-        }.onFailure { error ->
-            onError("Unable to close mDNS socket: ${error.message}")
-        }
-        activeSocket = null
-    }
-
-    fun shutdown() {
-        unregister()
-        scope.cancel()
     }
 
     private fun startAnnouncer(
@@ -122,9 +170,29 @@ class EspHomeNsdAdvertiser(
         instanceName: String,
         servicePort: Int,
     ) {
+        val generation = ++announcementGeneration
+        activeEndpoint = endpoint
+        activeGoodbyePacket = goodbyePacket
+        activeMulticastAddress = multicastAddress
         announcerJob = scope.launch {
-            val socket = createSocket(endpoint.network) ?: return@launch
-            activeSocket = socket
+            val socket = createSocket(endpoint.network) ?: run {
+                synchronized(this@EspHomeNsdAdvertiser) {
+                    if (generation == announcementGeneration && activeEndpoint == endpoint) {
+                        activeEndpoint = null
+                        activeGoodbyePacket = null
+                        activeMulticastAddress = null
+                        announcerJob = null
+                    }
+                }
+                return@launch
+            }
+            synchronized(this@EspHomeNsdAdvertiser) {
+                if (generation != announcementGeneration || activeEndpoint != endpoint) {
+                    socket.close()
+                    return@launch
+                }
+                activeSocket = socket
+            }
             try {
                 repeat(INITIAL_ANNOUNCE_BURST_COUNT) { index ->
                     sendPacket(socket, announcePacket, multicastAddress)
@@ -157,8 +225,91 @@ class EspHomeNsdAdvertiser(
                 runCatching {
                     socket.close()
                 }
-                if (activeSocket === socket) {
-                    activeSocket = null
+                synchronized(this@EspHomeNsdAdvertiser) {
+                    if (generation == announcementGeneration && activeSocket === socket) {
+                        activeSocket = null
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stopActiveAnnouncementLocked() {
+        announcementGeneration += 1
+        val socket = activeSocket
+        val goodbyePacket = activeGoodbyePacket
+        val multicastAddress = activeMulticastAddress
+        if (socket != null && goodbyePacket != null && multicastAddress != null) {
+            runCatching {
+                sendPacket(socket, goodbyePacket, multicastAddress)
+            }
+        }
+
+        val job = announcerJob
+        announcerJob = null
+        job?.cancel()
+        runCatching {
+            activeSocket?.close()
+        }.onFailure { error ->
+            onError("Unable to close mDNS socket: ${error.message}")
+        }
+        activeSocket = null
+        activeEndpoint = null
+        activeGoodbyePacket = null
+        activeMulticastAddress = null
+    }
+
+    private fun registerNetworkCallbackLocked() {
+        val manager = connectivityManager ?: return
+        if (networkCallback != null) {
+            return
+        }
+
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                scheduleEndpointRefresh("network available")
+            }
+
+            override fun onLost(network: Network) {
+                scheduleEndpointRefresh("network lost")
+            }
+
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                scheduleEndpointRefresh("network capabilities changed")
+            }
+
+            override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) {
+                scheduleEndpointRefresh("network link properties changed")
+            }
+        }
+        val requestBuilder = NetworkRequest.Builder()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            requestBuilder.clearCapabilities()
+        } else {
+            requestBuilder.removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+            requestBuilder.removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        }
+        val request = requestBuilder.build()
+
+        runCatching {
+            manager.registerNetworkCallback(request, callback)
+            networkCallback = callback
+            onLog("mDNS network change watcher registered")
+        }.onFailure { error ->
+            onLog("mDNS network change watcher unavailable: ${error.message}")
+        }
+    }
+
+    private fun scheduleEndpointRefresh(reason: String) {
+        synchronized(this) {
+            if (currentRegistration == null) {
+                return
+            }
+            endpointRefreshJob?.cancel()
+            endpointRefreshJob = scope.launch {
+                delay(NETWORK_RESELECT_DEBOUNCE_MS)
+                synchronized(this@EspHomeNsdAdvertiser) {
+                    refreshEndpointLocked(reason)
                 }
             }
         }
@@ -296,7 +447,10 @@ class EspHomeNsdAdvertiser(
         return out.toByteArray()
     }
 
-    private fun selectEndpoint(mode: NsdInterfaceMode): SelectedEndpoint? {
+    private fun selectEndpoint(
+        mode: NsdInterfaceMode,
+        transportOrder: List<NsdAdvertiseTransport>,
+    ): SelectedEndpoint? {
         val manager = connectivityManager
         if (manager == null) {
             onError("mDNS unavailable: ConnectivityManager is null")
@@ -311,9 +465,7 @@ class EspHomeNsdAdvertiser(
 
         val endpoints = allNetworks.mapNotNull { network ->
             val capabilities = manager.getNetworkCapabilities(network) ?: return@mapNotNull null
-            if (!matchesMode(mode, capabilities)) {
-                return@mapNotNull null
-            }
+            val transports = nsdTransports(capabilities)
             val linkProperties = manager.getLinkProperties(network) ?: return@mapNotNull null
             val ipv4Address = linkProperties.linkAddresses
                 .asSequence()
@@ -324,6 +476,7 @@ class EspHomeNsdAdvertiser(
             SelectedEndpoint(
                 network = network,
                 ipv4Address = ipv4Address,
+                transports = transports,
                 transportLabel = transportLabel(capabilities),
             )
         }
@@ -335,7 +488,23 @@ class EspHomeNsdAdvertiser(
         }
 
         val activeNetwork = manager.activeNetwork
-        return endpoints.firstOrNull { endpoint -> endpoint.network == activeNetwork } ?: endpoints.first()
+        val candidates = endpoints.map { endpoint ->
+            NsdEndpointCandidate(
+                endpoint = endpoint,
+                transports = endpoint.transports,
+                isActiveNetwork = endpoint.network == activeNetwork,
+            )
+        }
+        return NsdEndpointSelectionPolicy.chooseEndpoint(
+            mode = mode,
+            transportOrder = transportOrder,
+            candidates = candidates,
+        ) ?: run {
+            onError(
+                "mDNS interface mode ${mode.name.lowercase()} selected but no preferred matching network with IPv4 address is available",
+            )
+            null
+        }
     }
 
     private fun getAllNetworksCompat(manager: ConnectivityManager): List<Network> {
@@ -344,22 +513,26 @@ class EspHomeNsdAdvertiser(
         return networks.filterIsInstance<Network>()
     }
 
-    private fun matchesMode(mode: NsdInterfaceMode, capabilities: NetworkCapabilities): Boolean {
-        return when (mode) {
-            NsdInterfaceMode.AUTO -> true
-            NsdInterfaceMode.WIFI -> capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-            NsdInterfaceMode.CELLULAR -> capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-            NsdInterfaceMode.VPN -> capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-            NsdInterfaceMode.DISABLED -> false
-        }
-    }
-
     private fun transportLabel(capabilities: NetworkCapabilities): String {
         return when {
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
             else -> "other"
+        }
+    }
+
+    private fun nsdTransports(capabilities: NetworkCapabilities): Set<NsdAdvertiseTransport> {
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+            return setOf(NsdAdvertiseTransport.VPN)
+        }
+        return buildSet {
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                add(NsdAdvertiseTransport.WIFI)
+            }
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                add(NsdAdvertiseTransport.CELLULAR)
+            }
         }
     }
 
@@ -374,6 +547,7 @@ class EspHomeNsdAdvertiser(
         private const val INITIAL_ANNOUNCE_BURST_COUNT = 3
         private const val INITIAL_ANNOUNCE_BURST_INTERVAL_MS = 1_000L
         private const val PERIODIC_ANNOUNCE_INTERVAL_MS = 30_000L
+        private const val NETWORK_RESELECT_DEBOUNCE_MS = 500L
 
         private const val DNS_FLAGS_RESPONSE_AUTHORITATIVE = 0x8400
         private const val DNS_CLASS_IN = 0x0001
@@ -387,7 +561,14 @@ class EspHomeNsdAdvertiser(
     private data class SelectedEndpoint(
         val network: Network,
         val ipv4Address: Inet4Address,
+        val transports: Set<NsdAdvertiseTransport>,
         val transportLabel: String,
+    )
+
+    private data class AdvertisementRegistration(
+        val settings: ProxySettings,
+        val macAddress: String,
+        val port: Int,
     )
 
     private data class DnsRecord(

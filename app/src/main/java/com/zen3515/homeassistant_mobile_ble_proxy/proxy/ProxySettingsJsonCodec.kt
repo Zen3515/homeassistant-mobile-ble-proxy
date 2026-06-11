@@ -1,8 +1,8 @@
 package com.zen3515.homeassistant_mobile_ble_proxy.proxy
 
+import org.bouncycastle.util.encoders.Base64
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.Base64
 
 object ProxySettingsJsonCodec {
     private const val SCHEMA_VERSION = 1
@@ -59,6 +59,7 @@ object ProxySettingsJsonCodec {
             .put("scannerHealthCheckIntervalMs", settings.scannerHealthCheckIntervalMs)
             .put("scannerLowRateConsecutiveChecks", settings.scannerLowRateConsecutiveChecks)
             .put("nsdInterfaceMode", settings.nsdInterfaceMode.name)
+            .put("nsdTransportOrder", encodeNsdTransportOrder(settings.nsdTransportOrder))
             .put("advertisementFilters", encodeAdvertisementFilters(settings.advertisementFilters))
             .put(
                 "autoAddMatchedDevicesToLockScreenTargets",
@@ -153,11 +154,8 @@ object ProxySettingsJsonCodec {
                 defaultValue = defaults.scannerLowRateConsecutiveChecks,
                 validRange = 1..12,
             ),
-            nsdInterfaceMode = readOptionalEnum(
-                json = json,
-                fieldName = "nsdInterfaceMode",
-                defaultValue = defaults.nsdInterfaceMode,
-            ),
+            nsdInterfaceMode = decodeNsdInterfaceMode(json),
+            nsdTransportOrder = decodeNsdTransportOrder(json),
             advertisementFilters = decodeAdvertisementFilters(
                 readOptionalArray(
                     json = json,
@@ -191,6 +189,54 @@ object ProxySettingsJsonCodec {
             )
         }
         return array
+    }
+
+    private fun encodeNsdTransportOrder(order: List<NsdAdvertiseTransport>): JSONArray {
+        val array = JSONArray()
+        NsdAdvertiseDefaults.sanitizeTransportOrder(order).forEach { transport ->
+            array.put(transport.name)
+        }
+        return array
+    }
+
+    private fun decodeNsdInterfaceMode(json: JSONObject): NsdInterfaceMode {
+        val rawMode = readOptionalString(
+            json = json,
+            fieldName = "nsdInterfaceMode",
+            defaultValue = ProxySettings().nsdInterfaceMode.name,
+        )
+        val decoded = NsdAdvertiseDefaults.decodeInterfaceMode(rawMode)
+        if (decoded == NsdInterfaceMode.AUTO && rawMode != NsdInterfaceMode.AUTO.name) {
+            val knownName = NsdInterfaceMode.entries.any { it.name == rawMode }
+            if (!knownName) {
+                throw IllegalArgumentException("nsdInterfaceMode must be one of ${NsdInterfaceMode.entries.map { it.name }}.")
+            }
+        }
+        return decoded
+    }
+
+    private fun decodeNsdTransportOrder(json: JSONObject): List<NsdAdvertiseTransport> {
+        val array = readOptionalArray(
+            json = json,
+            fieldName = "nsdTransportOrder",
+        ) ?: return if (json.optString("nsdInterfaceMode") == NsdInterfaceMode.VPN.name) {
+            listOf(NsdAdvertiseTransport.VPN, NsdAdvertiseTransport.WIFI, NsdAdvertiseTransport.CELLULAR)
+        } else {
+            NsdAdvertiseDefaults.transportOrder
+        }
+
+        val decoded = buildList {
+            for (index in 0 until array.length()) {
+                val value = array.opt(index) as? String
+                    ?: throw IllegalArgumentException("nsdTransportOrder[$index] must be a string.")
+                val transport = NsdAdvertiseTransport.entries.firstOrNull { it.name == value }
+                    ?: throw IllegalArgumentException(
+                        "nsdTransportOrder[$index] must be one of ${NsdAdvertiseTransport.entries.map { it.name }}.",
+                    )
+                add(transport)
+            }
+        }
+        return NsdAdvertiseDefaults.sanitizeTransportOrder(decoded)
     }
 
     private fun decodeAdvertisementFilters(array: JSONArray?): List<AdvertisementFilterRule> {
@@ -429,9 +475,7 @@ object ProxySettingsJsonCodec {
             return
         }
         val normalized = value.filterNot(Char::isWhitespace)
-        val decoded = runCatching {
-            Base64.getDecoder().decode(normalized)
-        }.getOrNull() ?: throw IllegalArgumentException(
+        val decoded = decodeBase64Compat(normalized) ?: throw IllegalArgumentException(
             "espHomeApiEncryptionKey must be empty or valid base64.",
         )
         if (decoded.size != 32) {
@@ -439,5 +483,17 @@ object ProxySettingsJsonCodec {
                 "espHomeApiEncryptionKey must decode to exactly 32 bytes.",
             )
         }
+    }
+
+    private fun decodeBase64Compat(value: String): ByteArray? {
+        val padded = when (value.length % 4) {
+            0 -> value
+            2 -> "$value=="
+            3 -> "$value="
+            else -> return null
+        }
+        return runCatching {
+            Base64.decode(padded)
+        }.getOrNull()
     }
 }

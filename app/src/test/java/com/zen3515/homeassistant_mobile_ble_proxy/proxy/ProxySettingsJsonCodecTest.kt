@@ -23,7 +23,8 @@ class ProxySettingsJsonCodecTest {
             advertisementDiscoveryThrottleIntervalMs = 30_000,
             scannerHealthCheckIntervalMs = 15_000,
             scannerLowRateConsecutiveChecks = 5,
-            nsdInterfaceMode = NsdInterfaceMode.VPN,
+            nsdInterfaceMode = NsdInterfaceMode.PREFERRED,
+            nsdTransportOrder = listOf(NsdAdvertiseTransport.VPN, NsdAdvertiseTransport.WIFI),
             advertisementFilters = listOf(
                 AdvertisementFilterRule(
                     id = "rule-1",
@@ -49,6 +50,47 @@ class ProxySettingsJsonCodecTest {
         val decoded = ProxySettingsJsonCodec.fromJson(encoded)
 
         assertEquals(settings, decoded)
+    }
+
+    @Test
+    fun `fromJson migrates legacy vpn mode to preferred order`() {
+        val json = """
+            {
+              "schemaVersion": 1,
+              "settings": {
+                "nsdInterfaceMode": "VPN"
+              }
+            }
+        """.trimIndent()
+
+        val decoded = ProxySettingsJsonCodec.fromJson(json)
+
+        assertEquals(NsdInterfaceMode.PREFERRED, decoded.nsdInterfaceMode)
+        assertEquals(
+            listOf(NsdAdvertiseTransport.VPN, NsdAdvertiseTransport.WIFI, NsdAdvertiseTransport.CELLULAR),
+            decoded.nsdTransportOrder,
+        )
+    }
+
+    @Test
+    fun `fromJson preserves explicit nsd transport order`() {
+        val json = """
+            {
+              "schemaVersion": 1,
+              "settings": {
+                "nsdInterfaceMode": "PREFERRED",
+                "nsdTransportOrder": ["WIFI", "VPN"]
+              }
+            }
+        """.trimIndent()
+
+        val decoded = ProxySettingsJsonCodec.fromJson(json)
+
+        assertEquals(NsdInterfaceMode.PREFERRED, decoded.nsdInterfaceMode)
+        assertEquals(
+            listOf(NsdAdvertiseTransport.WIFI, NsdAdvertiseTransport.VPN),
+            decoded.nsdTransportOrder,
+        )
     }
 
     @Test

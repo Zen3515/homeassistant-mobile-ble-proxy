@@ -420,11 +420,28 @@ class BluetoothGattProxyManager(
     fun createBondIfUnbonded(address: Long): Boolean {
         val connection = connections[address] ?: return false
         val device = connection.gatt.device
-        if (device.bondState == BluetoothDevice.BOND_NONE) {
-            logInfo("GATT auto-pair triggering createBond() for ${connection.macAddress}")
-            return device.createBond()
+        if (!hasConnectPermission()) {
+            logInfo("GATT auto-pair skipped for ${connection.macAddress}: missing BLUETOOTH_CONNECT permission")
+            return false
         }
-        logInfo("GATT auto-pair skipped for ${connection.macAddress}: already bonded (${device.bondState})")
+
+        val bondState = try {
+            device.bondState
+        } catch (securityException: SecurityException) {
+            logInfo("GATT auto-pair permission denied for ${connection.macAddress}: ${securityException.message}")
+            return false
+        }
+
+        if (bondState == BluetoothDevice.BOND_NONE) {
+            logInfo("GATT auto-pair triggering createBond() for ${connection.macAddress}")
+            return try {
+                device.createBond()
+            } catch (securityException: SecurityException) {
+                logInfo("GATT auto-pair createBond() permission denied for ${connection.macAddress}: ${securityException.message}")
+                false
+            }
+        }
+        logInfo("GATT auto-pair skipped for ${connection.macAddress}: already bonded ($bondState)")
         return true
     }
 

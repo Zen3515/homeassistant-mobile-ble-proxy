@@ -32,6 +32,8 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -70,6 +72,8 @@ import com.zen3515.homeassistant_mobile_ble_proxy.proxy.AdvertisementFilterRule
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ManagedTargetDevice
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.MainUiState
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.MainViewModel
+import com.zen3515.homeassistant_mobile_ble_proxy.proxy.NsdAdvertiseDefaults
+import com.zen3515.homeassistant_mobile_ble_proxy.proxy.NsdAdvertiseTransport
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.NsdInterfaceMode
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyIdentity
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyLaunchContract
@@ -622,7 +626,7 @@ private fun HomeScreen(
                     Text("Node: ${uiState.settings.nodeName}")
                     Text("Port: ${uiState.settings.apiPort}")
                     Text("Scanner mode: ${uiState.settings.scannerMode.name.lowercase()}")
-                    Text("mDNS interface: ${uiState.settings.nsdInterfaceMode.toDisplayLabel()}")
+                    Text("mDNS interface: ${uiState.settings.nsdDisplayLabel()}")
                     Text("Ad flush interval: ${uiState.settings.advertisementFlushIntervalMs} ms")
                     Text(
                         if (uiState.settings.advertisementDedupWindowMs > 0) {
@@ -1127,11 +1131,17 @@ private fun SettingsScreen(
                             }
                             Button(
                                 onClick = {
-                                    onDraftSettingsChange(draftSettings.copy(nsdInterfaceMode = NsdInterfaceMode.VPN))
+                                    onDraftSettingsChange(draftSettings.copy(nsdInterfaceMode = NsdInterfaceMode.PREFERRED))
                                 },
                                 modifier = Modifier.weight(1f),
                             ) {
-                                Text(if (draftSettings.nsdInterfaceMode == NsdInterfaceMode.VPN) "VPN *" else "VPN")
+                                Text(
+                                    if (draftSettings.nsdInterfaceMode == NsdInterfaceMode.PREFERRED) {
+                                        "Preferred *"
+                                    } else {
+                                        "Preferred"
+                                    },
+                                )
                             }
                         }
                         Row(
@@ -1165,6 +1175,90 @@ private fun SettingsScreen(
                                         "Disabled"
                                     },
                                 )
+                            }
+                        }
+
+                        if (draftSettings.nsdInterfaceMode == NsdInterfaceMode.PREFERRED) {
+                            val transportOrder = NsdAdvertiseDefaults.sanitizeTransportOrder(
+                                draftSettings.nsdTransportOrder,
+                            )
+                            val visibleTransports = transportOrder +
+                                NsdAdvertiseTransport.entries.filterNot { it in transportOrder }
+
+                            Text("Preferred network order")
+                            visibleTransports.forEach { transport ->
+                                val orderIndex = transportOrder.indexOf(transport)
+                                val enabled = orderIndex >= 0
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        if (enabled) {
+                                            "${orderIndex + 1}. ${transport.toDisplayLabel()}"
+                                        } else {
+                                            "${transport.toDisplayLabel()} off"
+                                        },
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    IconButton(
+                                        onClick = {
+                                            onDraftSettingsChange(
+                                                draftSettings.copy(
+                                                    nsdTransportOrder = transportOrder.moveTransport(
+                                                        fromIndex = orderIndex,
+                                                        toIndex = orderIndex - 1,
+                                                    ),
+                                                ),
+                                            )
+                                        },
+                                        enabled = enabled && orderIndex > 0,
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.KeyboardArrowUp,
+                                            contentDescription = "Move ${transport.toDisplayLabel()} up",
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            onDraftSettingsChange(
+                                                draftSettings.copy(
+                                                    nsdTransportOrder = transportOrder.moveTransport(
+                                                        fromIndex = orderIndex,
+                                                        toIndex = orderIndex + 1,
+                                                    ),
+                                                ),
+                                            )
+                                        },
+                                        enabled = enabled && orderIndex < transportOrder.lastIndex,
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Filled.KeyboardArrowDown,
+                                            contentDescription = "Move ${transport.toDisplayLabel()} down",
+                                        )
+                                    }
+                                    Switch(
+                                        checked = enabled,
+                                        enabled = !enabled || transportOrder.size > 1,
+                                        onCheckedChange = { checked ->
+                                            val nextOrder = if (checked) {
+                                                transportOrder + transport
+                                            } else {
+                                                transportOrder.filterNot { it == transport }
+                                            }
+                                            if (nextOrder.isNotEmpty()) {
+                                                onDraftSettingsChange(
+                                                    draftSettings.copy(
+                                                        nsdTransportOrder = NsdAdvertiseDefaults.sanitizeTransportOrder(
+                                                            nextOrder,
+                                                        ),
+                                                    ),
+                                                )
+                                            }
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
@@ -1241,6 +1335,10 @@ private fun SettingsScreen(
                                 "mDNS interface mode auto: Android chooses the active local network for NSD."
                             }
 
+                            NsdInterfaceMode.PREFERRED -> {
+                                "mDNS preferred mode: NSD follows the selected network order and rebinds when networks change."
+                            }
+
                             NsdInterfaceMode.WIFI -> {
                                 "mDNS interface mode Wi-Fi: NSD is restricted to a Wi-Fi network when available."
                             }
@@ -1250,7 +1348,7 @@ private fun SettingsScreen(
                             }
 
                             NsdInterfaceMode.VPN -> {
-                                "mDNS interface mode VPN: NSD is restricted to VPN transport when available."
+                                "mDNS legacy VPN mode is migrated to preferred mode with VPN first."
                             }
 
                             NsdInterfaceMode.DISABLED -> {
@@ -1874,13 +1972,43 @@ private fun parseNoiseKey(value: String): NoiseKeyState {
     return if (decoded.size == 32) NoiseKeyState.VALID else NoiseKeyState.INVALID
 }
 
+private fun ProxySettings.nsdDisplayLabel(): String {
+    return if (nsdInterfaceMode == NsdInterfaceMode.PREFERRED) {
+        "preferred: ${NsdAdvertiseDefaults.sanitizeTransportOrder(nsdTransportOrder).joinToString(" > ") { it.toDisplayLabel() }}"
+    } else {
+        nsdInterfaceMode.toDisplayLabel()
+    }
+}
+
 private fun NsdInterfaceMode.toDisplayLabel(): String {
     return when (this) {
         NsdInterfaceMode.AUTO -> "auto"
+        NsdInterfaceMode.PREFERRED -> "preferred order"
         NsdInterfaceMode.WIFI -> "Wi-Fi only"
         NsdInterfaceMode.CELLULAR -> "cellular only"
-        NsdInterfaceMode.VPN -> "VPN only"
+        NsdInterfaceMode.VPN -> "legacy VPN"
         NsdInterfaceMode.DISABLED -> "disabled"
+    }
+}
+
+private fun NsdAdvertiseTransport.toDisplayLabel(): String {
+    return when (this) {
+        NsdAdvertiseTransport.VPN -> "VPN"
+        NsdAdvertiseTransport.WIFI -> "Wi-Fi"
+        NsdAdvertiseTransport.CELLULAR -> "Cellular"
+    }
+}
+
+private fun List<NsdAdvertiseTransport>.moveTransport(
+    fromIndex: Int,
+    toIndex: Int,
+): List<NsdAdvertiseTransport> {
+    if (fromIndex !in indices || toIndex !in indices || fromIndex == toIndex) {
+        return this
+    }
+    return toMutableList().apply {
+        val item = removeAt(fromIndex)
+        add(toIndex, item)
     }
 }
 

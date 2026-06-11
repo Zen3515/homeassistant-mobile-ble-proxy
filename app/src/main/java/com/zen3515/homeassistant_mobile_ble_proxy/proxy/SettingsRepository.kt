@@ -29,6 +29,7 @@ class SettingsRepository(private val context: Context) {
         val scannerHealthCheckIntervalMs = intPreferencesKey("scanner_health_check_interval_ms")
         val scannerLowRateConsecutiveChecks = intPreferencesKey("scanner_low_rate_consecutive_checks")
         val nsdInterfaceMode = stringPreferencesKey("nsd_interface_mode")
+        val nsdTransportOrder = stringPreferencesKey("nsd_transport_order")
         val advertisementFilters = stringPreferencesKey("advertisement_filters")
         val autoAddMatchedDevicesToLockScreenTargets = booleanPreferencesKey(
             "auto_add_matched_devices_to_lock_screen_targets",
@@ -66,9 +67,11 @@ class SettingsRepository(private val context: Context) {
             scannerLowRateConsecutiveChecks = (
                 prefs[Keys.scannerLowRateConsecutiveChecks] ?: ProxySettings().scannerLowRateConsecutiveChecks
             ).coerceIn(1, 12),
-            nsdInterfaceMode = NsdInterfaceMode.entries.firstOrNull {
-                it.name == (prefs[Keys.nsdInterfaceMode] ?: ProxySettings().nsdInterfaceMode.name)
-            } ?: NsdInterfaceMode.AUTO,
+            nsdInterfaceMode = NsdAdvertiseDefaults.decodeInterfaceMode(prefs[Keys.nsdInterfaceMode]),
+            nsdTransportOrder = decodeNsdTransportOrder(
+                serialized = prefs[Keys.nsdTransportOrder],
+                storedMode = prefs[Keys.nsdInterfaceMode],
+            ),
             advertisementFilters = decodeAdvertisementFilters(prefs[Keys.advertisementFilters]),
             autoAddMatchedDevicesToLockScreenTargets = prefs[Keys.autoAddMatchedDevicesToLockScreenTargets] ?: false,
             managedTargetDevices = decodeManagedTargetDevices(prefs[Keys.managedTargetDevices]),
@@ -91,6 +94,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.scannerHealthCheckIntervalMs] = settings.scannerHealthCheckIntervalMs
             prefs[Keys.scannerLowRateConsecutiveChecks] = settings.scannerLowRateConsecutiveChecks
             prefs[Keys.nsdInterfaceMode] = settings.nsdInterfaceMode.name
+            prefs[Keys.nsdTransportOrder] = encodeNsdTransportOrder(settings.nsdTransportOrder)
             prefs[Keys.advertisementFilters] = encodeAdvertisementFilters(settings.advertisementFilters)
             prefs[Keys.autoAddMatchedDevicesToLockScreenTargets] = settings.autoAddMatchedDevicesToLockScreenTargets
             prefs[Keys.managedTargetDevices] = encodeManagedTargetDevices(settings.managedTargetDevices)
@@ -135,6 +139,32 @@ class SettingsRepository(private val context: Context) {
             )
         }
         return array.toString()
+    }
+
+    private fun decodeNsdTransportOrder(
+        serialized: String?,
+        storedMode: String?,
+    ): List<NsdAdvertiseTransport> {
+        if (serialized.isNullOrBlank()) {
+            return if (storedMode == NsdInterfaceMode.VPN.name) {
+                listOf(NsdAdvertiseTransport.VPN, NsdAdvertiseTransport.WIFI, NsdAdvertiseTransport.CELLULAR)
+            } else {
+                NsdAdvertiseDefaults.transportOrder
+            }
+        }
+
+        val decoded = serialized
+            .split(',')
+            .mapNotNull { token ->
+                val normalized = token.trim().uppercase()
+                NsdAdvertiseTransport.entries.firstOrNull { it.name == normalized }
+            }
+        return NsdAdvertiseDefaults.sanitizeTransportOrder(decoded)
+    }
+
+    private fun encodeNsdTransportOrder(order: List<NsdAdvertiseTransport>): String {
+        return NsdAdvertiseDefaults.sanitizeTransportOrder(order)
+            .joinToString(separator = ",") { it.name }
     }
 
     private fun decodeManagedTargetDevices(json: String?): List<ManagedTargetDevice> {

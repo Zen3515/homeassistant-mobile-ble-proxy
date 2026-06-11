@@ -7,10 +7,37 @@ enum class ScannerMode {
 
 enum class NsdInterfaceMode {
     AUTO,
+    PREFERRED,
     WIFI,
     CELLULAR,
     VPN,
     DISABLED,
+}
+
+enum class NsdAdvertiseTransport {
+    VPN,
+    WIFI,
+    CELLULAR,
+}
+
+object NsdAdvertiseDefaults {
+    val transportOrder = listOf(
+        NsdAdvertiseTransport.VPN,
+        NsdAdvertiseTransport.WIFI,
+        NsdAdvertiseTransport.CELLULAR,
+    )
+
+    fun sanitizeTransportOrder(order: List<NsdAdvertiseTransport>): List<NsdAdvertiseTransport> {
+        val deduped = order.distinct()
+        return deduped.ifEmpty { transportOrder }
+    }
+
+    fun decodeInterfaceMode(storedName: String?): NsdInterfaceMode {
+        return when (storedName) {
+            NsdInterfaceMode.VPN.name -> NsdInterfaceMode.PREFERRED
+            else -> NsdInterfaceMode.entries.firstOrNull { it.name == storedName } ?: NsdInterfaceMode.AUTO
+        }
+    }
 }
 
 data class AdvertisementFilterRule(
@@ -44,6 +71,7 @@ data class ProxySettings(
     val scannerHealthCheckIntervalMs: Int = 10_000,
     val scannerLowRateConsecutiveChecks: Int = 3,
     val nsdInterfaceMode: NsdInterfaceMode = NsdInterfaceMode.AUTO,
+    val nsdTransportOrder: List<NsdAdvertiseTransport> = NsdAdvertiseDefaults.transportOrder,
     val advertisementFilters: List<AdvertisementFilterRule> = emptyList(),
     val autoAddMatchedDevicesToLockScreenTargets: Boolean = false,
     val managedTargetDevices: List<ManagedTargetDevice> = emptyList(),
