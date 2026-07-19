@@ -13,6 +13,7 @@ import java.util.UUID
 data class MainUiState(
     val settings: ProxySettings = ProxySettings(),
     val runtime: ProxyRuntimeSnapshot = ProxyRuntimeSnapshot(),
+    val lastCrashReport: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -32,8 +33,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<MainUiState> = combine(
         settings,
         ProxyRuntimeState.state,
-    ) { proxySettings, runtime ->
-        MainUiState(settings = proxySettings, runtime = runtime)
+        CrashDiagnostics.lastReport,
+    ) { proxySettings, runtime, lastCrashReport ->
+        MainUiState(
+            settings = proxySettings,
+            runtime = runtime,
+            lastCrashReport = lastCrashReport,
+        )
     }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
@@ -135,6 +141,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearRuntimeLogs() {
         ProxyRuntimeState.clearLogs()
+    }
+
+    fun clearLastCrashReport() {
+        CrashDiagnostics.clearLastReport()
     }
 
     private fun updateSettings(transform: (ProxySettings) -> ProxySettings) {

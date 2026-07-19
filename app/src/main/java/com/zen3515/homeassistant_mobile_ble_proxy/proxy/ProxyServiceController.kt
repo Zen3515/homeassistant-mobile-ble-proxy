@@ -11,17 +11,35 @@ object ProxyServiceController {
     const val ACTION_STOP = "com.zen3515.homeassistant_mobile_ble_proxy.action.STOP_PROXY"
 
     fun start(context: Context) {
+        CrashDiagnostics.recordLifecycle("controller request=start")
         val intent = Intent(context, BleProxyForegroundService::class.java).apply {
             action = ACTION_START
         }
-        ContextCompat.startForegroundService(context, intent)
+        runCatching {
+            ContextCompat.startForegroundService(context, intent)
+        }.onFailure { error ->
+            val detail = error.message ?: error.javaClass.simpleName
+            CrashDiagnostics.recordLifecycle(
+                "controller start-failed type=${error.javaClass.simpleName}",
+            )
+            ProxyRuntimeState.setError("Unable to request proxy start: $detail")
+            ProxyRuntimeState.appendLog("Unable to request proxy start: $detail")
+        }
     }
 
     fun stop(context: Context) {
-        val intent = Intent(context, BleProxyForegroundService::class.java).apply {
-            action = ACTION_STOP
+        CrashDiagnostics.recordLifecycle("controller request=stop")
+        val intent = Intent(context, BleProxyForegroundService::class.java)
+        runCatching {
+            context.stopService(intent)
+        }.onFailure { error ->
+            val detail = error.message ?: error.javaClass.simpleName
+            CrashDiagnostics.recordLifecycle(
+                "controller stop-failed type=${error.javaClass.simpleName}",
+            )
+            ProxyRuntimeState.setError("Unable to request proxy stop: $detail")
+            ProxyRuntimeState.appendLog("Unable to request proxy stop: $detail")
         }
-        ContextCompat.startForegroundService(context, intent)
     }
 
     fun isActuallyRunning(context: Context): Boolean {

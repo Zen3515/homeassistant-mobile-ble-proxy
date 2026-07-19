@@ -104,6 +104,7 @@ class MainActivity : ComponentActivity() {
                     onAutoStartOnBootChange = viewModel::setAutoStartOnBoot,
                     onSaveSettings = viewModel::saveSettings,
                     onClearRuntimeLogs = viewModel::clearRuntimeLogs,
+                    onClearLastCrashReport = viewModel::clearLastCrashReport,
                 )
             }
         }
@@ -154,6 +155,7 @@ private fun ProxyScreen(
     onAutoStartOnBootChange: (Boolean) -> Unit,
     onSaveSettings: (ProxySettings) -> Unit,
     onClearRuntimeLogs: () -> Unit,
+    onClearLastCrashReport: () -> Unit,
 ) {
     val context = LocalContext.current
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -193,6 +195,31 @@ private fun ProxyScreen(
             Toast.makeText(
                 context,
                 "Failed to export config: ${error.message ?: "unknown error"}",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+    val exportCrashReportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        if (uri == null) {
+            return@rememberLauncherForActivityResult
+        }
+
+        val report = uiState.lastCrashReport
+        if (report == null) {
+            Toast.makeText(context, "No crash report is available.", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+
+        runCatching {
+            writeTextToUri(context = context, uri = uri, text = report)
+        }.onSuccess {
+            Toast.makeText(context, "Crash report saved.", Toast.LENGTH_SHORT).show()
+        }.onFailure { error ->
+            Toast.makeText(
+                context,
+                "Failed to save crash report: ${error.message ?: "unknown error"}",
                 Toast.LENGTH_LONG,
             ).show()
         }
@@ -327,6 +354,10 @@ private fun ProxyScreen(
                 onImportConfig = {
                     importConfigLauncher.launch(arrayOf("application/json", "text/*"))
                 },
+                onExportCrashReport = {
+                    exportCrashReportLauncher.launch("ha-mobile-ble-proxy-crash.txt")
+                },
+                onClearLastCrashReport = onClearLastCrashReport,
                 onClearLogs = onClearRuntimeLogs,
                 logWrapEnabled = logWrapEnabled,
                 onToggleLogWrap = { logWrapEnabled = !logWrapEnabled },
@@ -424,6 +455,8 @@ private fun HomeScreen(
     onOpenSettings: () -> Unit,
     onExportConfig: () -> Unit,
     onImportConfig: () -> Unit,
+    onExportCrashReport: () -> Unit,
+    onClearLastCrashReport: () -> Unit,
     onClearLogs: () -> Unit,
     logWrapEnabled: Boolean,
     onToggleLogWrap: () -> Unit,
@@ -481,6 +514,61 @@ private fun HomeScreen(
                     Text("Advertisements forwarded: ${uiState.runtime.advertisementsForwarded}")
                     uiState.runtime.lastError?.let {
                         Text(it, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+
+            uiState.lastCrashReport?.let { crashReport ->
+                val crashPreview = crashReport.take(MAX_CRASH_REPORT_PREVIEW_CHARS)
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            "Previous Abnormal Exit",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Text(
+                            "Saved locally after the previous abnormal app exit. " +
+                                "Nothing is uploaded automatically.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    clipboardManager.setText(AnnotatedString(crashReport))
+                                },
+                            ) {
+                                Text("Copy")
+                            }
+                            TextButton(onClick = onExportCrashReport) {
+                                Text("Save")
+                            }
+                            TextButton(onClick = onClearLastCrashReport) {
+                                Text("Clear")
+                            }
+                        }
+                        if (crashPreview.length < crashReport.length) {
+                            Text(
+                                "Preview truncated; Copy or Save includes the complete report.",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        SelectionContainer {
+                            Text(
+                                text = crashPreview,
+                                modifier = Modifier.fillMaxWidth(),
+                                softWrap = true,
+                                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            )
+                        }
                     }
                 }
             }
@@ -2051,6 +2139,9 @@ private fun ProxyScreenPreview() {
             onAutoStartOnBootChange = {},
             onSaveSettings = {},
             onClearRuntimeLogs = {},
+            onClearLastCrashReport = {},
         )
     }
 }
+
+private const val MAX_CRASH_REPORT_PREVIEW_CHARS = 12_000

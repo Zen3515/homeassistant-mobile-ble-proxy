@@ -19,6 +19,7 @@ It is designed for Home Assistant users who want to run BLE proxying on an Andro
 - Lets you choose which network transport mDNS should use: `auto`, `wifi`, `cellular`, `vpn`, or `disabled`.
 - Generates a stable default Bluetooth MAC identity and a stable default ESPHome API encryption key.
 - Provides runtime logs in-app with copy, clear, and wrap toggle support.
+- Preserves the most recent production crash locally with copy, save, and clear controls after restart.
 
 ## BLE Scanning Modes
 
@@ -124,6 +125,12 @@ There is no Home Assistant URL or Home Assistant API token in the normal flow. H
 - For Xiaomi devices, battery restrictions are often the difference between working and failing background BLE behavior.
 - Pair, unpair, and clear-cache behavior depends on Android OEM BLE stack behavior.
 - For strict Bluetooth devices (like certain motorcycle stacks) that require a PIN or passkey, you can enable `Auto-Pair Device` in the target list so the proxy triggers an OS-level pairing prompt natively before Home Assistant drops the connection. After Android stores the bond, the proxy safely avoids redundant discoveries.
+
+### Production Crash Diagnostics
+
+If the app terminates unexpectedly, reopen it and look for the `Previous Abnormal Exit` card above the runtime log. Use `Copy` or `Save` to collect the report without USB debugging or Logcat, then use `Clear` after the problem is resolved.
+
+The report is bounded, redacts common secrets and network/device addresses, stays in Android's no-backup app storage, and is never uploaded automatically. Java/Kotlin exceptions are captured on every supported Android version; Android 11 and newer also provide historical reasons for ANRs, native crashes, initialization failures, and memory/resource termination.
 
 ## Downloads
 

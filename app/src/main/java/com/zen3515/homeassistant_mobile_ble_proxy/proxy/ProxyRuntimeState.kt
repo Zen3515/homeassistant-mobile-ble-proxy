@@ -3,6 +3,7 @@ package com.zen3515.homeassistant_mobile_ble_proxy.proxy
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -33,7 +34,7 @@ object ProxyRuntimeState {
     val state: StateFlow<ProxyRuntimeSnapshot> = mutableState.asStateFlow()
 
     fun update(transform: (ProxyRuntimeSnapshot) -> ProxyRuntimeSnapshot) {
-        mutableState.value = transform(mutableState.value)
+        mutableState.update(transform)
     }
 
     fun setServiceRunning(running: Boolean, port: Int = 0) {
@@ -118,5 +119,5 @@ object ProxyRuntimeState {
         return SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     }
 
-    private const val MAX_LOG_LINES = 50_000
+    private const val MAX_LOG_LINES = 5_000
 }

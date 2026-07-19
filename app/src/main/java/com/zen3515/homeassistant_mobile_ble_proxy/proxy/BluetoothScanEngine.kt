@@ -80,7 +80,11 @@ class BluetoothScanEngine(
     @Volatile
     private var retryAttempt = 0
 
+    @Volatile
+    private var shutdown = false
+
     private var retryJob: Job? = null
+    @Volatile
     private var currentMode: ScannerMode = ScannerMode.PASSIVE
     @Volatile
     private var configuredProfile: ScanProfile = ScanProfile.UNLOCKED_BROAD
@@ -102,17 +106,21 @@ class BluetoothScanEngine(
         }
 
         override fun onScanFailed(errorCode: Int) {
-            running = false
-            scanner = null
-            setActiveProfile(null)
-            onStateChanged(RuntimeScannerState.FAILED)
-            val failureName = scanFailureName(errorCode)
-            onError("BLE scan failed with code $errorCode ($failureName)")
-            scheduleScanRetry(errorCode, failureName)
+            synchronized(this@BluetoothScanEngine) {
+                if (shutdown) return
+                running = false
+                scanner = null
+                setActiveProfile(null)
+                onStateChanged(RuntimeScannerState.FAILED)
+                val failureName = scanFailureName(errorCode)
+                onError("BLE scan failed with code $errorCode ($failureName)")
+                scheduleScanRetry(errorCode, failureName)
+            }
         }
     }
 
     private fun handleScanResult(result: ScanResult) {
+        if (shutdown) return
         runCatching {
             val mac = result.device?.address ?: return
             val rawPayload = result.scanRecord?.bytes ?: ByteArray(0)
@@ -131,7 +139,9 @@ class BluetoothScanEngine(
         }
     }
 
+    @Synchronized
     fun setMode(mode: ScannerMode) {
+        if (shutdown) return
         val shouldRestart = running && currentMode != mode
         currentMode = mode
         if (shouldRestart) {
@@ -159,7 +169,9 @@ class BluetoothScanEngine(
         onProfileChanged(profile)
     }
 
+    @Synchronized
     fun restartForProfile(profile: ScanProfile): Boolean {
+        if (shutdown) return false
         configuredProfile = profile
         if (!running) {
             return false
@@ -176,7 +188,9 @@ class BluetoothScanEngine(
         return startInternal(profile = profile, mode = mode, fromRetry = false)
     }
 
+    @Synchronized
     private fun startInternal(profile: ScanProfile, mode: ScannerMode, fromRetry: Boolean): Boolean {
+        if (shutdown) return false
         configuredProfile = profile
         currentMode = mode
         shouldRun = true
@@ -287,6 +301,7 @@ class BluetoothScanEngine(
         }
     }
 
+    @Synchronized
     fun stop() {
         shouldRun = false
         retryAttempt = 0
@@ -320,13 +335,16 @@ class BluetoothScanEngine(
         onStateChanged(RuntimeScannerState.STOPPED)
     }
 
+    @Synchronized
     fun shutdown() {
+        if (shutdown) return
+        shutdown = true
         stop()
         scope.cancel()
     }
 
     private fun scheduleScanRetry(errorCode: Int, failureName: String) {
-        if (!shouldRun) {
+        if (shutdown || !shouldRun) {
             return
         }
 
@@ -346,7 +364,7 @@ class BluetoothScanEngine(
                 synchronized(retryLock) {
                     retryJob = null
                 }
-                if (!shouldRun || running) {
+                if (shutdown || !shouldRun || running) {
                     return@launch
                 }
                 startInternal(profile = configuredProfile, mode = currentMode, fromRetry = true)

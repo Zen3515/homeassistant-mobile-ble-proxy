@@ -17,12 +17,15 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.zen3515.homeassistant_mobile_ble_proxy.MainActivity
 import com.zen3515.homeassistant_mobile_ble_proxy.R
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -33,6 +36,7 @@ class BleProxyForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val settingsRepository by lazy { SettingsRepository(applicationContext) }
     private val settingsMutationLock = Any()
+    private val lifecycleCoordinator = ServiceLifecycleCoordinator()
 
     @Volatile
     private var started = false
@@ -48,58 +52,47 @@ class BleProxyForegroundService : Service() {
     private var scannerHealthJob: Job? = null
     private var wakeLockRenewalJob: Job? = null
     private var settingsSyncJob: Job? = null
+    private var startupJob: Job? = null
     private var screenReceiver: BroadcastReceiver? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        CrashDiagnostics.recordLifecycle(
+            "service command=${intent?.action ?: "restart"} startId=$startId",
+        )
         when (intent?.action) {
             ProxyServiceController.ACTION_STOP -> {
+                CrashDiagnostics.recordLifecycle("service stop-command begin startId=$startId")
                 logRuntime("Stop requested")
+                val stopGeneration = lifecycleCoordinator.requestStop()
+                cancelStartup()
                 stopProxy()
                 stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                lifecycleCoordinator.markStopped(stopGeneration)
+                stopSelfResult(startId)
+                CrashDiagnostics.recordLifecycle("service stop-command complete startId=$startId")
                 return START_NOT_STICKY
             }
 
             ProxyServiceController.ACTION_START, null -> {
                 logRuntime("Start requested")
-                ensureNotificationChannel()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val connectedDeviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                    val hasFineLocationPermission = ContextCompat.checkSelfPermission(
-                        this,
-                        android.Manifest.permission.ACCESS_FINE_LOCATION,
-                    ) == PackageManager.PERMISSION_GRANTED
-                    val locationType = if (hasFineLocationPermission) {
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
-                    } else {
-                        0
-                    }
-                    val preferredType = connectedDeviceType or locationType
-                    runCatching {
-                        startForeground(
-                            NOTIFICATION_ID,
-                            buildNotification("Starting proxy"),
-                            preferredType,
-                        )
-                    }.onFailure {
-                        logRuntime(
-                            "Foreground type $preferredType failed (${it.message}); " +
-                                "falling back to connectedDevice only",
-                        )
-                        startForeground(
-                            NOTIFICATION_ID,
-                            buildNotification("Starting proxy"),
-                            connectedDeviceType,
-                        )
-                    }
-                } else {
-                    startForeground(NOTIFICATION_ID, buildNotification("Starting proxy"))
+                val token = lifecycleCoordinator.requestStart(startId)
+                if (token == null) {
+                    CrashDiagnostics.recordLifecycle("service startup ignored startId=$startId")
+                    logRuntime("Start ignored (already starting or running)")
+                    return START_STICKY
                 }
-                scope.launch {
-                    startProxyIfNeeded()
+
+                if (!promoteToForeground(startId)) {
+                    lifecycleCoordinator.markStartFailed(token)
+                    started = false
+                    stopSelfResult(startId)
+                    return START_NOT_STICKY
                 }
+
+                started = true
+                startupJob = scope.launch { startProxy(token) }
                 return START_STICKY
             }
 
@@ -108,88 +101,157 @@ class BleProxyForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        CrashDiagnostics.recordLifecycle("service onDestroy begin")
+        val stopGeneration = lifecycleCoordinator.requestStop()
+        cancelStartup()
         stopProxy()
+        lifecycleCoordinator.markStopped(stopGeneration)
         scope.cancel()
+        CrashDiagnostics.recordLifecycle("service onDestroy complete")
         super.onDestroy()
     }
 
-    private suspend fun startProxyIfNeeded() {
-        if (started) {
-            logRuntime("Start ignored (already running)")
-            return
-        }
-
-        started = true
-        registerScreenReceiver()
-        acquireWakeLockIfNeeded()
-        startWakeLockRenewal()
-        ProxyRuntimeState.resetCounters()
-        logRuntime("Initializing proxy runtime")
-        currentSettings = settingsRepository.settings.first()
-        if (!isBatteryOptimizationIgnored()) {
-            logRuntime("Battery optimization is enabled; unrestricted battery is recommended for lock-screen BLE scanning")
-        }
-        macAddress = ProxyIdentity.resolveMacAddress(
-            context = applicationContext,
-            overrideMac = currentSettings.bluetoothMacOverride,
-        )
-        val enabledFilterCount = currentSettings.advertisementFilters.count { it.enabled }
-        logRuntime(
-            "Loaded settings: node=${currentSettings.nodeName}, port=${currentSettings.apiPort}, " +
-                "scanner=${currentSettings.scannerMode.name.lowercase()}, " +
-                "flush=${currentSettings.advertisementFlushIntervalMs}ms, " +
-                "dedup=${currentSettings.advertisementDedupWindowMs}ms, " +
-                "discovery_throttle=${currentSettings.advertisementDiscoveryThrottleIntervalMs}ms, " +
-                "watchdog_interval=${currentSettings.scannerHealthCheckIntervalMs}ms, " +
-                "low_rate_checks=${currentSettings.scannerLowRateConsecutiveChecks}, " +
-                "nsd=${currentSettings.nsdInterfaceMode.name.lowercase()}, " +
-                "nsd_order=${currentSettings.nsdTransportOrder.joinToString(">") { it.name.lowercase() }}, " +
-                "filters=${if (enabledFilterCount == 0) "allow-all" else "$enabledFilterCount"}, " +
-                "lock_targets=${currentSettings.managedTargetDevices.size}, " +
-                "auto_add=${if (currentSettings.autoAddMatchedDevicesToLockScreenTargets) "on" else "off"}, " +
-                "gatt_notify_log=${if (currentSettings.verboseGattNotifyDataLogging) "verbose" else "normal"}, " +
-                "encryption=${if (currentSettings.espHomeApiEncryptionKey.isBlank()) "off" else "on"}",
-        )
-
-        scannerEngine = BluetoothScanEngine(
-            context = applicationContext,
-            managedTargetDevices = currentSettings.managedTargetDevices,
-            onAdvertisement = { advertisement ->
-                apiServer?.publishAdvertisement(advertisement)
+    private fun promoteToForeground(startId: Int): Boolean {
+        return runCatching {
+            ensureNotificationChannel()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val connectedDeviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                val hasFineLocationPermission = ContextCompat.checkSelfPermission(
+                    this,
+                    android.Manifest.permission.ACCESS_FINE_LOCATION,
+                ) == PackageManager.PERMISSION_GRANTED
+                val locationType = if (hasFineLocationPermission) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                } else {
+                    0
+                }
+                val preferredType = connectedDeviceType or locationType
+                runCatching {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        buildNotification("Starting proxy"),
+                        preferredType,
+                    )
+                }.getOrElse { preferredError ->
+                    logRuntime(
+                        "Foreground type $preferredType failed (${preferredError.message}); " +
+                            "falling back to connectedDevice only",
+                    )
+                    startForeground(
+                        NOTIFICATION_ID,
+                        buildNotification("Starting proxy"),
+                        connectedDeviceType,
+                    )
+                }
+            } else {
+                startForeground(NOTIFICATION_ID, buildNotification("Starting proxy"))
+            }
+        }.fold(
+            onSuccess = {
+                CrashDiagnostics.recordLifecycle("service foreground active startId=$startId")
+                true
             },
-            onStateChanged = { state ->
-                ProxyRuntimeState.setScannerState(state)
-                logRuntime("Scanner state: ${state.name.lowercase()}")
-                apiServer?.onScannerStateChanged(state)
-                updateNotification("Scanner: ${state.name.lowercase()}")
-            },
-            onProfileChanged = { profile ->
-                ProxyRuntimeState.setActiveScanProfile(profile)
-            },
-            onError = { message ->
-                ProxyRuntimeState.setError(message)
-                logRuntime("Scanner error: $message")
-                updateNotification(message)
-            },
-            onLog = { message ->
-                logRuntime("Scanner info: $message")
+            onFailure = { error ->
+                val detail = error.message ?: error.javaClass.simpleName
+                CrashDiagnostics.recordLifecycle(
+                    "service foreground failed startId=$startId type=${error.javaClass.simpleName}",
+                )
+                ProxyRuntimeState.setError("Unable to start foreground proxy: $detail")
+                logRuntime("Unable to start foreground proxy: $detail")
+                false
             },
         )
-        reconcileScannerProfile(reason = "startup")
+    }
 
-        nsdAdvertiser = EspHomeNsdAdvertiser(
-            context = applicationContext,
-            onError = { message ->
-                ProxyRuntimeState.setError(message)
-                logRuntime("mDNS error: $message")
-                updateNotification(message)
-            },
-            onLog = { message ->
-                logRuntime("mDNS info: $message")
-            },
+    private fun cancelStartup() {
+        startupJob?.cancel()
+        startupJob = null
+    }
+
+    private suspend fun startProxy(token: ServiceLifecycleCoordinator.StartToken) {
+        val startId = token.startId
+        CrashDiagnostics.recordLifecycle(
+            "service startup begin startId=$startId generation=${token.generation}",
         )
+        try {
+            registerScreenReceiver()
+            acquireWakeLockIfNeeded()
+            startWakeLockRenewal()
+            ProxyRuntimeState.resetCounters()
+            logRuntime("Initializing proxy runtime")
+            currentSettings = settingsRepository.settings.first()
+            coroutineContext.ensureActive()
+            if (!lifecycleCoordinator.isCurrent(token)) {
+                return
+            }
+            CrashDiagnostics.recordLifecycle("service startup settings-loaded startId=$startId")
+            if (!isBatteryOptimizationIgnored()) {
+                logRuntime(
+                    "Battery optimization is enabled; unrestricted battery is recommended for " +
+                        "lock-screen BLE scanning",
+                )
+            }
+            macAddress = ProxyIdentity.resolveMacAddress(
+                context = applicationContext,
+                overrideMac = currentSettings.bluetoothMacOverride,
+            )
+            val enabledFilterCount = currentSettings.advertisementFilters.count { it.enabled }
+            logRuntime(
+                "Loaded settings: node=${currentSettings.nodeName}, port=${currentSettings.apiPort}, " +
+                    "scanner=${currentSettings.scannerMode.name.lowercase()}, " +
+                    "flush=${currentSettings.advertisementFlushIntervalMs}ms, " +
+                    "dedup=${currentSettings.advertisementDedupWindowMs}ms, " +
+                    "discovery_throttle=${currentSettings.advertisementDiscoveryThrottleIntervalMs}ms, " +
+                    "watchdog_interval=${currentSettings.scannerHealthCheckIntervalMs}ms, " +
+                    "low_rate_checks=${currentSettings.scannerLowRateConsecutiveChecks}, " +
+                    "nsd=${currentSettings.nsdInterfaceMode.name.lowercase()}, " +
+                    "nsd_order=${currentSettings.nsdTransportOrder.joinToString(">") { it.name.lowercase() }}, " +
+                    "filters=${if (enabledFilterCount == 0) "allow-all" else "$enabledFilterCount"}, " +
+                    "lock_targets=${currentSettings.managedTargetDevices.size}, " +
+                    "auto_add=${if (currentSettings.autoAddMatchedDevicesToLockScreenTargets) "on" else "off"}, " +
+                    "gatt_notify_log=${if (currentSettings.verboseGattNotifyDataLogging) "verbose" else "normal"}, " +
+                    "encryption=${if (currentSettings.espHomeApiEncryptionKey.isBlank()) "off" else "on"}",
+            )
 
-        runCatching {
+            scannerEngine = BluetoothScanEngine(
+                context = applicationContext,
+                managedTargetDevices = currentSettings.managedTargetDevices,
+                onAdvertisement = { advertisement ->
+                    apiServer?.publishAdvertisement(advertisement)
+                },
+                onStateChanged = { state ->
+                    ProxyRuntimeState.setScannerState(state)
+                    logRuntime("Scanner state: ${state.name.lowercase()}")
+                    apiServer?.onScannerStateChanged(state)
+                    updateNotification("Scanner: ${state.name.lowercase()}")
+                },
+                onProfileChanged = { profile ->
+                    ProxyRuntimeState.setActiveScanProfile(profile)
+                },
+                onError = { message ->
+                    ProxyRuntimeState.setError(message)
+                    logRuntime("Scanner error: $message")
+                    updateNotification(message)
+                },
+                onLog = { message ->
+                    logRuntime("Scanner info: $message")
+                },
+            )
+            reconcileScannerProfile(reason = "startup")
+            CrashDiagnostics.recordLifecycle("service startup scanner-created startId=$startId")
+
+            nsdAdvertiser = EspHomeNsdAdvertiser(
+                context = applicationContext,
+                onError = { message ->
+                    ProxyRuntimeState.setError(message)
+                    logRuntime("mDNS error: $message")
+                    updateNotification(message)
+                },
+                onLog = { message ->
+                    logRuntime("mDNS info: $message")
+                },
+            )
+
             val server = EspHomeApiServer(
                 context = applicationContext,
                 settings = currentSettings,
@@ -212,31 +274,53 @@ class BleProxyForegroundService : Service() {
                     logRuntime(message)
                 },
             )
-            val port = server.start()
             apiServer = server
+            val port = server.start()
+            CrashDiagnostics.recordLifecycle("service startup server-bound startId=$startId")
             listeningPort = port
             nsdAdvertiser?.register(currentSettings, macAddress, port)
+            if (!lifecycleCoordinator.markRunning(token)) {
+                stopProxy()
+                return
+            }
             ProxyRuntimeState.setServiceRunning(true, port)
             BleProxyTileService.onServiceRunningChanged(applicationContext, true)
             logRuntime("Proxy listening on 0.0.0.0:$port (mac=$macAddress)")
             startSettingsSync()
             startScannerHealthWatchdog()
             updateNotification("Listening on port $port")
-        }.onFailure {
-            started = false
-            ProxyRuntimeState.setServiceRunning(false)
-            ProxyRuntimeState.setDesiredScanProfile(null)
-            ProxyRuntimeState.setActiveScanProfile(null)
-            BleProxyTileService.onServiceRunningChanged(applicationContext, false)
-            ProxyRuntimeState.setError("Failed to start proxy: ${it.message}")
-            logRuntime("Failed to start proxy: ${it.message}")
-            updateNotification("Failed to start")
-            releaseWakeLockIfHeld()
-            stopSelf()
+            CrashDiagnostics.recordLifecycle("service startup complete startId=$startId")
+        } catch (cancelled: CancellationException) {
+            CrashDiagnostics.recordLifecycle(
+                "service startup cancelled startId=$startId generation=${token.generation}",
+            )
+            throw cancelled
+        } catch (error: Exception) {
+            val cleanupStartId = lifecycleCoordinator.latestStartId(token)
+            if (!lifecycleCoordinator.markStartFailed(token)) {
+                CrashDiagnostics.recordLifecycle(
+                    "service stale startup failure ignored startId=$startId generation=${token.generation}",
+                )
+                return
+            }
+            CrashDiagnostics.recordLifecycle(
+                "service startup failed startId=$startId type=${error.javaClass.simpleName}",
+            )
+            val detail = error.message ?: error.javaClass.simpleName
+            ProxyRuntimeState.setError("Failed to start proxy: $detail")
+            logRuntime("Failed to start proxy: $detail")
+            stopProxy()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            cleanupStartId?.let(::stopSelfResult)
+        } finally {
+            if (lifecycleCoordinator.isCurrent(token)) {
+                startupJob = null
+            }
         }
     }
 
     private fun stopProxy() {
+        CrashDiagnostics.recordLifecycle("service teardown begin")
         logRuntime("Stopping proxy")
         scannerHealthJob?.cancel()
         scannerHealthJob = null
@@ -245,15 +329,24 @@ class BleProxyForegroundService : Service() {
         settingsSyncJob?.cancel()
         settingsSyncJob = null
 
-        scannerEngine?.shutdown()
-        scannerEngine = null
-
-        apiServer?.stop()
+        val server = apiServer
         apiServer = null
+        runCatching { server?.stop() }.onFailure { error ->
+            logRuntime("API server teardown failed: ${error.message ?: error.javaClass.simpleName}")
+        }
+
+        val scanner = scannerEngine
+        scannerEngine = null
+        runCatching { scanner?.shutdown() }.onFailure { error ->
+            logRuntime("Scanner teardown failed: ${error.message ?: error.javaClass.simpleName}")
+        }
         listeningPort = 0
 
-        nsdAdvertiser?.shutdown()
+        val advertiser = nsdAdvertiser
         nsdAdvertiser = null
+        runCatching { advertiser?.shutdown() }.onFailure { error ->
+            logRuntime("mDNS teardown failed: ${error.message ?: error.javaClass.simpleName}")
+        }
 
         started = false
         ProxyRuntimeState.setServiceRunning(false)
@@ -264,6 +357,7 @@ class BleProxyForegroundService : Service() {
         unregisterScreenReceiver()
         releaseWakeLockIfHeld()
         logRuntime("Proxy stopped")
+        CrashDiagnostics.recordLifecycle("service teardown complete")
     }
 
     private fun startScannerHealthWatchdog() {
@@ -552,6 +646,12 @@ class BleProxyForegroundService : Service() {
     }
 
     private fun updateNotification(status: String) {
+        if (!started ||
+            lifecycleCoordinator.state == ServiceLifecycleCoordinator.State.STOPPING ||
+            lifecycleCoordinator.state == ServiceLifecycleCoordinator.State.STOPPED
+        ) {
+            return
+        }
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, buildNotification(status))
     }

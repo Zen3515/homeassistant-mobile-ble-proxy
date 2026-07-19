@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.Closeable
@@ -34,6 +35,7 @@ class EspHomeApiServer(
     private val autoPairMacsSet = settings.managedTargetDevices.filter { it.enableAutoPair }.map { it.macAddress.uppercase() }.toSet()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val closed = AtomicBoolean(false)
     private var acceptJob: Job? = null
     private var advertisementFlushJob: Job? = null
     private var serverSocket: ServerSocket? = null
@@ -102,6 +104,7 @@ class EspHomeApiServer(
     private var lowRateConsecutiveChecks: Int = 0
 
     fun start(): Int {
+        check(!closed.get()) { "API server has already been stopped" }
         if (serverSocket != null) {
             return serverSocket?.localPort ?: settings.apiPort
         }
@@ -135,19 +138,19 @@ class EspHomeApiServer(
     }
 
     fun stop() {
-        log("API server stopping")
-        runCatching {
-            acceptJob?.cancel()
-            advertisementFlushJob?.cancel()
-            serverSocket?.close()
+        if (!closed.compareAndSet(false, true)) {
+            return
         }
-
+        log("API server stopping")
+        acceptJob?.cancel()
+        advertisementFlushJob?.cancel()
+        val socket = serverSocket
         serverSocket = null
         acceptJob = null
         advertisementFlushJob = null
+        scope.cancel()
+        runCatching { socket?.close() }
         resetAdvertisementRuntimeState()
-
-        gattManager.stop()
 
         val sessions = synchronized(clientsLock) {
             val snapshot = clients.toList()
@@ -156,11 +159,13 @@ class EspHomeApiServer(
         }
 
         sessions.forEach { it.closeQuietly() }
+        gattManager.stop()
         ProxyRuntimeState.setClientCount(0)
         log("API server stopped")
     }
 
     fun publishAdvertisement(advertisement: RawAdvertisement) {
+        if (closed.get()) return
         lastAdvertisementReceivedAtMs = SystemClock.elapsedRealtime()
         receivedAdvertisements += 1
         if (receivedAdvertisements == 1L || receivedAdvertisements % 1000L == 0L) {
@@ -233,6 +238,7 @@ class EspHomeApiServer(
     }
 
     fun recoverScannerIfStalled(maxSilenceMs: Long = DEFAULT_SCANNER_STALL_TIMEOUT_MS): Boolean {
+        if (closed.get()) return false
         if (scannerState != RuntimeScannerState.RUNNING) {
             resetReceiveRateTracking()
             return false
@@ -275,6 +281,7 @@ class EspHomeApiServer(
     }
 
     fun onScannerStateChanged(state: RuntimeScannerState) {
+        if (closed.get()) return
         scannerState = state
         if (state == RuntimeScannerState.RUNNING) {
             lastScannerRunningAtMs = SystemClock.elapsedRealtime()
@@ -299,13 +306,25 @@ class EspHomeApiServer(
                     return
                 }
 
-            scope.launch {
-                handleClient(clientSocket)
+            val clientJob = scope.launch {
+                try {
+                    handleClient(clientSocket)
+                } finally {
+                    runCatching { clientSocket.close() }
+                }
+            }
+            clientJob.invokeOnCompletion {
+                // Also closes sockets whose coroutine was cancelled before its body started.
+                runCatching { clientSocket.close() }
             }
         }
     }
 
     private fun handleClient(socket: Socket) {
+        if (closed.get()) {
+            runCatching { socket.close() }
+            return
+        }
         socket.tcpNoDelay = true
         val remoteAddress = socket.inetAddress?.hostAddress ?: socket.remoteSocketAddress.toString()
 
@@ -347,7 +366,14 @@ class EspHomeApiServer(
         }
 
         log("Client connected: $remoteAddress")
-        registerClient(session)
+        if (closed.get()) {
+            session.closeQuietly()
+            return
+        }
+        if (!registerClient(session)) {
+            session.closeQuietly()
+            return
+        }
 
         var lastInboundType: Int? = null
         try {
@@ -384,13 +410,15 @@ class EspHomeApiServer(
         }
     }
 
-    private fun registerClient(session: ClientSession) {
+    private fun registerClient(session: ClientSession): Boolean {
         val count = synchronized(clientsLock) {
+            if (closed.get()) return false
             clients.add(session)
             clients.size
         }
         ProxyRuntimeState.setClientCount(count)
         log("Clients now: $count")
+        return true
     }
 
     private fun unregisterClient(session: ClientSession) {
@@ -404,7 +432,7 @@ class EspHomeApiServer(
         }
         ProxyRuntimeState.setClientCount(count)
 
-        if (shouldStopScanner) {
+        if (shouldStopScanner && !closed.get()) {
             scannerEngine.stop()
             clearAdvertisementDeliveryState("last advertisement client disconnected")
             log("Stopped scanner because no subscribed BLE advertisement clients remain")
@@ -413,6 +441,7 @@ class EspHomeApiServer(
     }
 
     private fun handleFrame(session: ClientSession, frame: EspHomeFrameCodec.Frame): Boolean {
+        if (closed.get()) return false
         return when (frame.typeId) {
             EspHomeMessageType.HELLO_REQUEST -> {
                 if (!EspHomeProtoCodec.canParse(frame.payload)) {
@@ -713,6 +742,7 @@ class EspHomeApiServer(
     }
 
     private fun updateScannerSubscriptionState() {
+        if (closed.get()) return
         val (subscriberCount, shouldRun) = synchronized(clientsLock) {
             val count = clients.count { it.subscribedAdvertisements }
             count to (count > 0)
@@ -812,13 +842,6 @@ class EspHomeApiServer(
             typeId = EspHomeMessageType.BLUETOOTH_LE_RAW_ADVERTISEMENTS_RESPONSE,
             payload = payload,
         ) { it.subscribedAdvertisements }
-
-        for (advertisement in filtered) {
-            log(
-                "Forwarded BLE advertisement: addr=${ProxyIdentity.longToMac(advertisement.address)}, " +
-                    "rssi=${advertisement.rssi}, bytes=${advertisement.data.size}",
-            )
-        }
 
         ProxyRuntimeState.incrementAdvertisementsForwarded(filtered.size)
         forwardedAdvertisements += filtered.size.toLong()
@@ -1216,6 +1239,7 @@ class EspHomeApiServer(
     }
 
     private fun restartScannerForRecovery(reason: String, nowMs: Long): Boolean {
+        if (closed.get()) return false
         if (nowMs - lastScannerRecoveryAtMs < MIN_SCANNER_RECOVERY_INTERVAL_MS) {
             return false
         }
