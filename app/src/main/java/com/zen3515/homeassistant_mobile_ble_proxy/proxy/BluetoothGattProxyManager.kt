@@ -30,6 +30,8 @@ class BluetoothGattProxyManager(
     private val onEvent: (Event) -> Unit,
     private val onError: (String) -> Unit,
     private val onInfo: (String) -> Unit = {},
+    private val connectionParamsController: BluetoothConnectionParamsController =
+        UnsupportedBluetoothConnectionParamsController,
 ) {
     sealed interface Event {
         data class DeviceConnection(
@@ -181,6 +183,7 @@ class BluetoothGattProxyManager(
         var serviceCachePolicy: ServiceCachePolicy,
         var state: ConnectionState,
         var mtu: Int,
+        val disconnectWatchdog: DisconnectWatchdog,
     ) {
         var connectTimeout: Runnable? = null
         var mtuNegotiationPending: Boolean = false
@@ -201,6 +204,7 @@ class BluetoothGattProxyManager(
 
         val pendingOperations: ArrayDeque<PendingOperation> = ArrayDeque()
         var inFlightOperation: PendingOperation? = null
+        val teardownGuard = ConnectionTeardownGuard()
     }
 
     private val bluetoothManager: BluetoothManager = context.getSystemService(BluetoothManager::class.java)
@@ -238,6 +242,43 @@ class BluetoothGattProxyManager(
     fun connectionLimit(): Int = maxConnections
 
     fun allocatedConnections(): List<Long> = allocatedSnapshot
+
+    fun supportsExactConnectionParameters(): Boolean = connectionParamsController.supportsExactParameters
+
+    fun handleSetConnectionParams(
+        request: EspHomeProtoCodec.ConnectionParamsRequest,
+        onResult: (Int) -> Unit,
+    ) {
+        runOnMain {
+            if (!connectionParamsController.supportsExactParameters) {
+                onResult(BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED)
+                return@runOnMain
+            }
+            val connection = connections[request.address]
+            if (connection == null || connection.state != ConnectionState.CONNECTED) {
+                onResult(ERROR_NOT_CONNECTED)
+                return@runOnMain
+            }
+
+            val normalizedRequest = request.clampedToBleParameterWidth()
+            val error = try {
+                connectionParamsController.apply(connection.gatt, normalizedRequest)
+            } catch (securityException: SecurityException) {
+                onError(
+                    "Connection parameter permission denied for ${connection.macAddress}: " +
+                        securityException.message,
+                )
+                ERROR_PERMISSION_DENIED
+            } catch (throwable: Throwable) {
+                onError(
+                    "Connection parameter update failed for ${connection.macAddress}: " +
+                        throwable.message,
+                )
+                ERROR_OPERATION_FAILED
+            }
+            onResult(error)
+        }
+    }
 
     fun handleDeviceRequest(request: EspHomeProtoCodec.DeviceRequest) {
         runOnMain {
@@ -662,6 +703,7 @@ class BluetoothGattProxyManager(
             updateAllocatedSnapshot()
 
             existing.forEach { connection ->
+                cancelConnectionTimeouts(connection)
                 disconnectGattQuietly(connection.gatt, connection.macAddress)
                 closeGattQuietly(connection.gatt, connection.macAddress)
             }
@@ -1081,6 +1123,11 @@ class BluetoothGattProxyManager(
             serviceCachePolicy = serviceCachePolicy,
             state = ConnectionState.CONNECTING,
             mtu = DEFAULT_MTU,
+            disconnectWatchdog = DisconnectWatchdog(
+                timeoutMs = DISCONNECT_TIMEOUT_MS,
+                postDelayed = { callback, delayMs -> mainHandler.postDelayed(callback, delayMs) },
+                removeCallback = mainHandler::removeCallbacks,
+            ),
         )
         scheduleConnectTimeout(connections.getValue(address))
         updateAllocatedSnapshot()
@@ -1098,6 +1145,14 @@ class BluetoothGattProxyManager(
             return
         }
 
+        if (connection.state == ConnectionState.DISCONNECTING) {
+            if (!connection.disconnectWatchdog.isArmed) {
+                scheduleDisconnectTimeout(connection)
+            }
+            logInfo("GATT disconnect already pending for ${connection.macAddress}")
+            return
+        }
+
         connection.state = ConnectionState.DISCONNECTING
         val disconnected = runCatching {
             disconnectGattQuietly(connection.gatt, connection.macAddress)
@@ -1107,18 +1162,20 @@ class BluetoothGattProxyManager(
         }
         if (!disconnected) {
             closeConnection(connection, ERROR_OPERATION_FAILED)
+            return
         }
+        scheduleDisconnectTimeout(connection)
     }
 
     private fun closeConnection(connection: Connection, error: Int) {
+        if (connections[connection.address] !== connection || !connection.teardownGuard.tryFinalize()) {
+            closeGattQuietly(connection.gatt, "stale ${connection.macAddress}")
+            return
+        }
         connections.remove(connection.address)
         updateAllocatedSnapshot()
 
-        connection.connectTimeout?.let(mainHandler::removeCallbacks)
-        connection.connectTimeout = null
-        connection.mtuNegotiationTimeout?.let(mainHandler::removeCallbacks)
-        connection.mtuNegotiationTimeout = null
-        connection.mtuNegotiationPending = false
+        cancelConnectionTimeouts(connection)
         closeGattQuietly(connection.gatt, connection.macAddress)
 
         connection.inFlightOperation = null
@@ -1131,6 +1188,15 @@ class BluetoothGattProxyManager(
 
         emit(Event.DeviceConnection(address = connection.address, connected = false, mtu = 0, error = error))
         emitConnectionsChanged()
+    }
+
+    private fun cancelConnectionTimeouts(connection: Connection) {
+        connection.connectTimeout?.let(mainHandler::removeCallbacks)
+        connection.connectTimeout = null
+        connection.disconnectWatchdog.cancel()
+        connection.mtuNegotiationTimeout?.let(mainHandler::removeCallbacks)
+        connection.mtuNegotiationTimeout = null
+        connection.mtuNegotiationPending = false
     }
 
     private fun clearServiceCache(connection: Connection) {
@@ -1218,6 +1284,20 @@ class BluetoothGattProxyManager(
         mainHandler.postDelayed(timeout, CONNECT_TIMEOUT_MS)
     }
 
+    private fun scheduleDisconnectTimeout(connection: Connection) {
+        connection.disconnectWatchdog.arm {
+            val current = connections[connection.address]
+            if (current !== connection || connection.state != ConnectionState.DISCONNECTING) {
+                return@arm
+            }
+            logInfo(
+                "GATT disconnect timed out for ${connection.macAddress} after ${DISCONNECT_TIMEOUT_MS}ms; " +
+                    "force-closing stale connection",
+            )
+            closeConnection(connection, ERROR_OPERATION_FAILED)
+        }
+    }
+
     private fun completeInitialMtuNegotiation(connection: Connection, releaseReason: String) {
         if (!connection.mtuNegotiationPending) {
             return
@@ -1291,6 +1371,17 @@ class BluetoothGattProxyManager(
                     }
 
                     if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                        if (connection.state == ConnectionState.DISCONNECTING) {
+                            logInfo(
+                                "GATT received a late connected callback for ${connection.macAddress} " +
+                                    "while disconnecting; keeping the disconnect watchdog active",
+                            )
+                            if (!connection.disconnectWatchdog.isArmed) {
+                                scheduleDisconnectTimeout(connection)
+                            }
+                            disconnectGattQuietly(gatt, connection.macAddress)
+                            return@runOnMain
+                        }
                         connection.connectTimeout?.let(mainHandler::removeCallbacks)
                         connection.connectTimeout = null
                         connection.state = ConnectionState.CONNECTED
@@ -1916,6 +2007,7 @@ class BluetoothGattProxyManager(
         private const val DEFAULT_MTU = 23
         private const val REQUESTED_MTU = 517
         private const val CONNECT_TIMEOUT_MS = 10_000L
+        private const val DISCONNECT_TIMEOUT_MS = 10_000L
         private const val INITIAL_MTU_TIMEOUT_MS = 1_500L
         private const val BOND_TIMEOUT_MS = 15_000L
         private const val CLEAR_CACHE_TIMEOUT_MS = 12_000L

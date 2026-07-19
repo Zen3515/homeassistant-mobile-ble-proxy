@@ -84,6 +84,27 @@ object EspHomeProtoCodec {
         val enable: Boolean,
     )
 
+    data class ConnectionParamsRequest(
+        val address: Long,
+        val minInterval: Long,
+        val maxInterval: Long,
+        val latency: Long,
+        val timeout: Long,
+    ) {
+        fun fitsBleParameterWidth(): Boolean =
+            minInterval <= UShort.MAX_VALUE.toLong() &&
+                maxInterval <= UShort.MAX_VALUE.toLong() &&
+                latency <= UShort.MAX_VALUE.toLong() &&
+                timeout <= UShort.MAX_VALUE.toLong()
+
+        fun clampedToBleParameterWidth(): ConnectionParamsRequest = copy(
+            minInterval = minInterval.coerceAtMost(UShort.MAX_VALUE.toLong()),
+            maxInterval = maxInterval.coerceAtMost(UShort.MAX_VALUE.toLong()),
+            latency = latency.coerceAtMost(UShort.MAX_VALUE.toLong()),
+            timeout = timeout.coerceAtMost(UShort.MAX_VALUE.toLong()),
+        )
+    }
+
     data class GattDescriptor(
         val uuid: UUID,
         val handle: Int,
@@ -333,6 +354,34 @@ object EspHomeProtoCodec {
         )
     }
 
+    fun parseConnectionParamsRequest(payload: ByteArray): ConnectionParamsRequest? {
+        var address = 0L
+        var minInterval = 0L
+        var maxInterval = 0L
+        var latency = 0L
+        var timeout = 0L
+
+        val ok = parse(payload) { input, fieldNumber, tag ->
+            when (fieldNumber) {
+                1 -> address = input.readUInt64()
+                2 -> minInterval = Integer.toUnsignedLong(input.readUInt32())
+                3 -> maxInterval = Integer.toUnsignedLong(input.readUInt32())
+                4 -> latency = Integer.toUnsignedLong(input.readUInt32())
+                5 -> timeout = Integer.toUnsignedLong(input.readUInt32())
+                else -> input.skipField(tag)
+            }
+        }
+        if (!ok) return null
+
+        return ConnectionParamsRequest(
+            address = address,
+            minInterval = minInterval,
+            maxInterval = maxInterval,
+            latency = latency,
+            timeout = timeout,
+        )
+    }
+
     fun encodeHelloResponse(
         apiMajor: Int,
         apiMinor: Int,
@@ -458,6 +507,32 @@ object EspHomeProtoCodec {
         }
     }
 
+    fun encodeGattGetServicesResponseBatches(
+        address: Long,
+        services: List<GattService>,
+        maxPayloadBytes: Int,
+    ): List<ByteArray> {
+        require(maxPayloadBytes > 0) { "maxPayloadBytes must be positive" }
+        if (services.isEmpty()) return emptyList()
+
+        val batches = mutableListOf<ByteArray>()
+        val current = mutableListOf<GattService>()
+        for (service in services) {
+            val candidate = encodeGattGetServicesResponse(address, current + service)
+            if (current.isNotEmpty() && candidate.size > maxPayloadBytes) {
+                batches += encodeGattGetServicesResponse(address, current)
+                current.clear()
+            }
+            current += service
+        }
+        if (current.isNotEmpty()) {
+            // A single service can exceed the preferred size. It must still be sent because
+            // splitting inside a service would change the ESPHome message structure.
+            batches += encodeGattGetServicesResponse(address, current)
+        }
+        return batches
+    }
+
     fun encodeGattGetServicesDoneResponse(address: Long): ByteArray {
         return encode {
             writeUInt64(1, address)
@@ -499,6 +574,13 @@ object EspHomeProtoCodec {
             writeUInt64(1, address)
             writeUInt32(2, handle)
             writeInt32(3, error)
+        }
+    }
+
+    fun encodeConnectionParamsResponse(address: Long, error: Int): ByteArray {
+        return encode {
+            writeUInt64(1, address)
+            writeInt32(2, error)
         }
     }
 

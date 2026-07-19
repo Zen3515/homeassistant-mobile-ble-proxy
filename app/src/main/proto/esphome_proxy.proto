@@ -160,3 +160,16 @@ message BluetoothScannerStateResponse {
 message BluetoothScannerSetModeRequest {
   BluetoothScannerMode mode = 1;
 }
+
+message BluetoothSetConnectionParamsRequest {
+  uint64 address = 1;
+  uint32 min_interval = 2;
+  uint32 max_interval = 3;
+  uint32 latency = 4;
+  uint32 timeout = 5;
+}
+
+message BluetoothSetConnectionParamsResponse {
+  uint64 address = 1;
+  int32 error = 2;
+}

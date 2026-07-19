@@ -109,12 +109,9 @@ class EspHomeNsdAdvertiser(
         val serviceName = ProxyIdentity.sanitizeServiceName(settings.nodeName)
         val hostName = "$serviceName.local"
         val instanceName = "$serviceName.$ESPHOME_SERVICE_TYPE"
-        val txtAttributes = linkedMapOf(
-            "version" to "2026.3.0",
-            "mac" to registration.macAddress,
-            "platform" to "ESP32",
-            "board" to "android",
-            "network" to endpoint.transportLabel,
+        val txtAttributes = buildEspHomeMdnsTxtAttributes(
+            macAddress = registration.macAddress,
+            network = endpoint.transportLabel,
         )
 
         // We intentionally bypass Android's NsdManager here:
@@ -580,3 +577,14 @@ class EspHomeNsdAdvertiser(
     )
 
 }
+
+internal fun buildEspHomeMdnsTxtAttributes(
+    macAddress: String,
+    network: String,
+): LinkedHashMap<String, String> = linkedMapOf(
+    "version" to EspHomeCompatibility.VERSION,
+    "mac" to macAddress,
+    "platform" to "ESP32",
+    "board" to "android",
+    "network" to network,
+)

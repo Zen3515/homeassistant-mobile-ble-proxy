@@ -406,6 +406,7 @@ class EspHomeApiServer(
 
         if (shouldStopScanner) {
             scannerEngine.stop()
+            clearAdvertisementDeliveryState("last advertisement client disconnected")
             log("Stopped scanner because no subscribed BLE advertisement clients remain")
         }
         log("Clients now: $count")
@@ -421,9 +422,9 @@ class EspHomeApiServer(
                 session.send(
                     EspHomeMessageType.HELLO_RESPONSE,
                     EspHomeProtoCodec.encodeHelloResponse(
-                        apiMajor = 1,
-                        apiMinor = 14,
-                        serverInfo = "Android BLE Proxy",
+                        apiMajor = EspHomeCompatibility.API_VERSION_MAJOR,
+                        apiMinor = EspHomeCompatibility.API_VERSION_MINOR,
+                        serverInfo = EspHomeCompatibility.VERSION,
                         name = settings.nodeName,
                     ),
                 )
@@ -503,6 +504,23 @@ class EspHomeApiServer(
                 log("Scanner mode set by client ${session.remoteAddress}: ${mode.name.lowercase()}")
                 scannerEngine.setMode(configuredScannerMode)
                 broadcastScannerState()
+                true
+            }
+
+            EspHomeMessageType.BLUETOOTH_SET_CONNECTION_PARAMS_REQUEST -> {
+                val request = EspHomeProtoCodec.parseConnectionParamsRequest(frame.payload) ?: return false
+                gattManager.handleSetConnectionParams(request) { error ->
+                    scope.launch {
+                        sendToSession(
+                            session = session,
+                            typeId = EspHomeMessageType.BLUETOOTH_SET_CONNECTION_PARAMS_RESPONSE,
+                            payload = EspHomeProtoCodec.encodeConnectionParamsResponse(
+                                address = request.address,
+                                error = error,
+                            ),
+                        )
+                    }
+                }
                 true
             }
 
@@ -622,13 +640,17 @@ class EspHomeApiServer(
             }
 
             is BluetoothGattProxyManager.Event.GattServicesComplete -> {
-                broadcast(
-                    typeId = EspHomeMessageType.BLUETOOTH_GATT_GET_SERVICES_RESPONSE,
-                    payload = EspHomeProtoCodec.encodeGattGetServicesResponse(
-                        address = event.address,
-                        services = event.services,
-                    ),
-                ) { true }
+                val batches = EspHomeProtoCodec.encodeGattGetServicesResponseBatches(
+                    address = event.address,
+                    services = event.services,
+                    maxPayloadBytes = MAX_GATT_SERVICES_PAYLOAD_BYTES,
+                )
+                for (payload in batches) {
+                    broadcast(
+                        typeId = EspHomeMessageType.BLUETOOTH_GATT_GET_SERVICES_RESPONSE,
+                        payload = payload,
+                    ) { true }
+                }
                 broadcast(
                     typeId = EspHomeMessageType.BLUETOOTH_GATT_GET_SERVICES_DONE_RESPONSE,
                     payload = EspHomeProtoCodec.encodeGattGetServicesDoneResponse(event.address),
@@ -702,6 +724,7 @@ class EspHomeApiServer(
         } else {
             log("BLE advertisement subscribers=0, stopping scanner")
             scannerEngine.stop()
+            clearAdvertisementDeliveryState("no advertisement subscribers")
         }
     }
 
@@ -751,19 +774,26 @@ class EspHomeApiServer(
         return EspHomeProtoCodec.encodeDeviceInfoResponse(
             nodeName = settings.nodeName,
             macAddress = macAddress,
-            esphomeVersion = "2026.3.0-android",
+            esphomeVersion = EspHomeCompatibility.VERSION,
             compilationTime = "android-runtime",
             model = "Android",
             legacyBluetoothProxyVersion = 5,
             manufacturer = buildManufacturer,
             friendlyName = settings.friendlyName,
-            bluetoothProxyFeatureFlags = BluetoothProxyFeatureFlags.ACTIVE_FEATURE_FLAGS,
+            bluetoothProxyFeatureFlags = BluetoothProxyFeatureFlags.activeFeatureFlags(
+                connectionParamsSupported = gattManager.supportsExactConnectionParameters(),
+            ),
             bluetoothMacAddress = macAddress,
             apiEncryptionSupported = true,
         )
     }
 
     private fun flushPendingAdvertisements() {
+        val hasSubscribers = synchronized(clientsLock) { clients.any { it.subscribedAdvertisements } }
+        if (!hasSubscribers) {
+            clearAdvertisementDeliveryState("flush with no subscribers")
+            return
+        }
         val batch = synchronized(pendingAdvertisementsLock) {
             drainPendingAdvertisementsLocked(ADVERTISEMENT_BATCH_SIZE)
         }
@@ -1043,6 +1073,19 @@ class EspHomeApiServer(
         }
     }
 
+    private fun sendToSession(session: ClientSession, typeId: Int, payload: ByteArray) {
+        runCatching {
+            session.send(typeId, payload)
+        }.onFailure {
+            log(
+                "Send failed (${messageTypeName(typeId)}) to ${session.remoteAddress}: " +
+                    "${it.javaClass.simpleName}: ${it.message}",
+            )
+            session.closeQuietly()
+            unregisterClient(session)
+        }
+    }
+
     private class ClientSession(
         val socket: Socket,
         val transport: EspHomeTransport,
@@ -1117,6 +1160,26 @@ class EspHomeApiServer(
         receivedAdvertisements = 0
         droppedAdvertisements = 0
         immediateFlushScheduled.set(false)
+    }
+
+    private fun clearAdvertisementDeliveryState(reason: String) {
+        val pendingCount = synchronized(pendingAdvertisementsLock) {
+            val count = pendingAdvertisements.size
+            pendingAdvertisements.clear()
+            pendingFingerprintToAddress.clear()
+            pendingAddressToFingerprint.clear()
+            lastObservedAtByFingerprint.clear()
+            count
+        }
+        synchronized(dedupLock) {
+            lastForwardedAdvertisementStateByAddress.clear()
+        }
+        synchronized(discoveryThrottleLock) {
+            discoveryThrottleStateByAddress.clear()
+        }
+        if (pendingCount > 0) {
+            log("Cleared $pendingCount pending BLE advertisement(s): $reason")
+        }
     }
 
     private fun clearAdvertisementRuntimeStateForAddress(address: Long, reason: String) {
@@ -1304,6 +1367,7 @@ class EspHomeApiServer(
     companion object {
         private const val MAX_CONNECTION_SLOTS = 5
         private const val ADVERTISEMENT_BATCH_SIZE = 16
+        private const val MAX_GATT_SERVICES_PAYLOAD_BYTES = 1_360
         private const val MAX_PENDING_ADVERTISEMENTS = 2_048
         private const val MAX_DISCOVERY_OBSERVATION_ENTRIES = 20_000
         private const val MAX_DEDUP_ENTRIES = 10_000
@@ -1386,6 +1450,8 @@ class EspHomeApiServer(
                 EspHomeMessageType.BLUETOOTH_LE_RAW_ADVERTISEMENTS_RESPONSE -> "BLUETOOTH_LE_RAW_ADVERTISEMENTS_RESPONSE(93)"
                 EspHomeMessageType.BLUETOOTH_SCANNER_STATE_RESPONSE -> "BLUETOOTH_SCANNER_STATE_RESPONSE(126)"
                 EspHomeMessageType.BLUETOOTH_SCANNER_SET_MODE_REQUEST -> "BLUETOOTH_SCANNER_SET_MODE_REQUEST(127)"
+                EspHomeMessageType.BLUETOOTH_SET_CONNECTION_PARAMS_REQUEST -> "BLUETOOTH_SET_CONNECTION_PARAMS_REQUEST(145)"
+                EspHomeMessageType.BLUETOOTH_SET_CONNECTION_PARAMS_RESPONSE -> "BLUETOOTH_SET_CONNECTION_PARAMS_RESPONSE(146)"
                 else -> "type=$typeId"
             }
         }

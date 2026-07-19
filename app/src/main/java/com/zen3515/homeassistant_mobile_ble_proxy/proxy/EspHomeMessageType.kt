@@ -38,6 +38,8 @@ object EspHomeMessageType {
     const val BLUETOOTH_LE_RAW_ADVERTISEMENTS_RESPONSE = 93
     const val BLUETOOTH_SCANNER_STATE_RESPONSE = 126
     const val BLUETOOTH_SCANNER_SET_MODE_REQUEST = 127
+    const val BLUETOOTH_SET_CONNECTION_PARAMS_REQUEST = 145
+    const val BLUETOOTH_SET_CONNECTION_PARAMS_RESPONSE = 146
 }
 
 object BluetoothProxyFeatureFlags {
@@ -48,6 +50,7 @@ object BluetoothProxyFeatureFlags {
     const val FEATURE_CACHE_CLEARING = 1 shl 4
     const val FEATURE_RAW_ADVERTISEMENTS = 1 shl 5
     const val FEATURE_STATE_AND_MODE = 1 shl 6
+    const val FEATURE_CONNECTION_PARAMS_SETTING = 1 shl 7
 
     const val PASSIVE_FEATURE_FLAGS = FEATURE_PASSIVE_SCAN or FEATURE_RAW_ADVERTISEMENTS or FEATURE_STATE_AND_MODE
     const val ACTIVE_FEATURE_FLAGS =
@@ -56,4 +59,11 @@ object BluetoothProxyFeatureFlags {
             FEATURE_REMOTE_CACHING or
             FEATURE_PAIRING or
             FEATURE_CACHE_CLEARING
+
+    fun activeFeatureFlags(connectionParamsSupported: Boolean): Int =
+        if (connectionParamsSupported) {
+            ACTIVE_FEATURE_FLAGS or FEATURE_CONNECTION_PARAMS_SETTING
+        } else {
+            ACTIVE_FEATURE_FLAGS
+        }
 }

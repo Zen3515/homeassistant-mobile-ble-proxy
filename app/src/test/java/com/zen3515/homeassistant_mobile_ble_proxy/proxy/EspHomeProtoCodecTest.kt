@@ -125,6 +125,52 @@ class EspHomeProtoCodecTest {
     }
 
     @Test
+    fun `parseConnectionParamsRequest reads all upstream fields`() {
+        val payload = encodeProto {
+            writeUInt64(1, 0xAABBCCDDEEFFL)
+            writeUInt32(2, 24)
+            writeUInt32(3, 40)
+            writeUInt32(4, 2)
+            writeUInt32(5, 500)
+        }
+
+        val parsed = EspHomeProtoCodec.parseConnectionParamsRequest(payload)
+
+        assertNotNull(parsed)
+        assertEquals(0xAABBCCDDEEFFL, parsed?.address)
+        assertEquals(24L, parsed?.minInterval)
+        assertEquals(40L, parsed?.maxInterval)
+        assertEquals(2L, parsed?.latency)
+        assertEquals(500L, parsed?.timeout)
+        assertTrue(checkNotNull(parsed).fitsBleParameterWidth())
+    }
+
+    @Test
+    fun `parseConnectionParamsRequest preserves uint32 values and clamps only at platform boundary`() {
+        val payload = encodeProto {
+            writeUInt32(2, -1)
+            writeUInt32(3, 65_536)
+        }
+
+        val parsed = checkNotNull(EspHomeProtoCodec.parseConnectionParamsRequest(payload))
+
+        assertEquals(0xFFFF_FFFFL, parsed.minInterval)
+        assertEquals(65_536L, parsed.maxInterval)
+        assertFalse(parsed.fitsBleParameterWidth())
+        assertEquals(65_535L, parsed.clampedToBleParameterWidth().minInterval)
+        assertEquals(65_535L, parsed.clampedToBleParameterWidth().maxInterval)
+    }
+
+    @Test
+    fun `parseConnectionParamsRequest accepts protobuf defaults and rejects malformed input`() {
+        assertEquals(
+            EspHomeProtoCodec.ConnectionParamsRequest(0, 0, 0, 0, 0),
+            EspHomeProtoCodec.parseConnectionParamsRequest(ByteArray(0)),
+        )
+        assertNull(EspHomeProtoCodec.parseConnectionParamsRequest(byteArrayOf(0x10, 0x80.toByte())))
+    }
+
+    @Test
     fun `encodeGattReadResponse writes fields`() {
         val payload = EspHomeProtoCodec.encodeGattReadResponse(
             address = 0xCAFEL,
@@ -200,6 +246,26 @@ class EspHomeProtoCodecTest {
     }
 
     @Test
+    fun `encodeConnectionParamsResponse writes address and error`() {
+        val payload = EspHomeProtoCodec.encodeConnectionParamsResponse(
+            address = 0xAABBCCDDEEFFL,
+            error = -95,
+        )
+        var address = 0L
+        var error = 0
+
+        parseFields(payload) { input, fieldNumber, _ ->
+            when (fieldNumber) {
+                1 -> address = input.readUInt64()
+                2 -> error = input.readInt32()
+            }
+        }
+
+        assertEquals(0xAABBCCDDEEFFL, address)
+        assertEquals(-95, error)
+    }
+
+    @Test
     fun `encodeGattGetServicesResponse contains services`() {
         val payload = EspHomeProtoCodec.encodeGattGetServicesResponse(
             address = 0x1122L,
@@ -240,6 +306,79 @@ class EspHomeProtoCodecTest {
 
         assertEquals(0x1122L, parsedAddress)
         assertEquals(1, serviceCount)
+    }
+
+    @Test
+    fun `large GATT service trees are split into bounded response batches`() {
+        val uuid = UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb")
+        val services = (1..60).map { index ->
+            EspHomeProtoCodec.GattService(
+                uuid = uuid,
+                handle = index * 3,
+                characteristics = listOf(
+                    EspHomeProtoCodec.GattCharacteristic(
+                        uuid = uuid,
+                        handle = index * 3 + 1,
+                        properties = 0x12,
+                        descriptors = listOf(
+                            EspHomeProtoCodec.GattDescriptor(uuid = uuid, handle = index * 3 + 2),
+                        ),
+                    ),
+                ),
+            )
+        }
+
+        val batches = EspHomeProtoCodec.encodeGattGetServicesResponseBatches(
+            address = 0x112233445566L,
+            services = services,
+            maxPayloadBytes = 300,
+        )
+
+        assertTrue(batches.size > 1)
+        assertTrue(batches.all { it.size <= 300 })
+        var encodedServiceCount = 0
+        for (batch in batches) {
+            parseFields(batch) { input, fieldNumber, tag ->
+                when (fieldNumber) {
+                    1 -> input.readUInt64()
+                    2 -> {
+                        input.readByteArray()
+                        encodedServiceCount += 1
+                    }
+                    else -> input.skipField(tag)
+                }
+            }
+        }
+        assertEquals(services.size, encodedServiceCount)
+    }
+
+    @Test
+    fun `raw advertisement encoder preserves forced zero value fields`() {
+        val payload = EspHomeProtoCodec.encodeRawAdvertisementsResponse(
+            listOf(RawAdvertisement(address = 0, rssi = 0, addressType = 0, data = ByteArray(0))),
+        )
+        var nestedPayload = ByteArray(0)
+        parseFields(payload) { input, fieldNumber, tag ->
+            if (fieldNumber == 1) {
+                nestedPayload = input.readByteArray()
+            } else {
+                input.skipField(tag)
+            }
+        }
+
+        val seenFields = mutableSetOf<Int>()
+        parseFields(nestedPayload) { input, fieldNumber, tag ->
+            seenFields += fieldNumber
+            when (fieldNumber) {
+                1 -> input.readUInt64()
+                2 -> input.readSInt32()
+                3 -> input.readUInt32()
+                4 -> input.readByteArray()
+                else -> input.skipField(tag)
+            }
+        }
+
+        assertEquals(setOf(1, 2, 3, 4), seenFields)
     }
 
     @Test
