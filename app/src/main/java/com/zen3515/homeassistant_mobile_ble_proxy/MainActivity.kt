@@ -1934,6 +1934,7 @@ private fun requiredPermissions(): Array<String> {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         permissions += Manifest.permission.BLUETOOTH_SCAN
         permissions += Manifest.permission.BLUETOOTH_CONNECT
+        permissions += Manifest.permission.BLUETOOTH_ADVERTISE
     }
     permissions += Manifest.permission.ACCESS_FINE_LOCATION
     if (Build.VERSION.SDK_INT in Build.VERSION_CODES.Q..Build.VERSION_CODES.R) {
