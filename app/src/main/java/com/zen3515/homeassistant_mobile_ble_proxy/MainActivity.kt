@@ -1194,6 +1194,14 @@ private fun SettingsScreen(
                         },
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    Text(
+                        text = "Changing this restarts the proxy, which leaves an already-loaded " +
+                            "ha-ble-adv integration pointing at an adapter that briefly disappeared. " +
+                            "If your devices show as unavailable afterwards, reload it in Home Assistant: " +
+                            "Settings > Devices & Services > BLE ADV > Reload.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
