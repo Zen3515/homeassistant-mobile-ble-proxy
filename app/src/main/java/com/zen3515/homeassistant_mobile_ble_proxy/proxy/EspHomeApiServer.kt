@@ -63,6 +63,8 @@ class EspHomeApiServer(
     private val discoveryThrottleStateByAddress = HashMap<Long, DiscoveryThrottleState>()
     private val immediateFlushScheduled = AtomicBoolean(false)
 
+    private val bleAdvProxyEnabled = settings.bleAdvProxyEnabled
+
     private val bleAdvertiseManager = BleAdvertiseManager(
         context = context,
         onError = onError,
@@ -152,9 +154,11 @@ class EspHomeApiServer(
                 flushPendingAdvertisements()
             }
         }
-        bleAdvEventJob = scope.launch {
-            for ((address, data) in bleAdvEvents) {
-                processBleAdvRawRecv(address, data)
+        if (bleAdvProxyEnabled) {
+            bleAdvEventJob = scope.launch {
+                for ((address, data) in bleAdvEvents) {
+                    processBleAdvRawRecv(address, data)
+                }
             }
         }
 
@@ -164,7 +168,7 @@ class EspHomeApiServer(
             "${compiledAdvertisementFilters.size} rule(s)"
         }
         log(
-            "API server started (port=${socket.localPort}, encryption=${if (noisePsk != null) "on" else "off"}, filters=$filterSummary, discovery_throttle=${settings.advertisementDiscoveryThrottleIntervalMs}ms, rediscovery=${DISCOVERY_REDISCOVERY_WINDOW_MS}ms, low_rate_checks=${settings.scannerLowRateConsecutiveChecks})",
+            "API server started (port=${socket.localPort}, encryption=${if (noisePsk != null) "on" else "off"}, filters=$filterSummary, discovery_throttle=${settings.advertisementDiscoveryThrottleIntervalMs}ms, rediscovery=${DISCOVERY_REDISCOVERY_WINDOW_MS}ms, low_rate_checks=${settings.scannerLowRateConsecutiveChecks}, ble_adv=${if (bleAdvProxyEnabled) "on" else "off"})",
         )
         return socket.localPort
     }
@@ -519,23 +523,25 @@ class EspHomeApiServer(
                 if (!EspHomeProtoCodec.canParse(frame.payload)) {
                     return false
                 }
-                session.send(
-                    EspHomeMessageType.LIST_ENTITIES_TEXT_SENSOR_RESPONSE,
-                    EspHomeProtoCodec.encodeListEntitiesTextSensorResponse(
-                        objectId = ADAPTER_NAME_OBJECT_ID,
-                        key = ADAPTER_NAME_KEY,
-                        name = ADAPTER_NAME_OBJECT_ID,
-                    ),
-                )
-                for (service in BLE_ADV_SERVICES) {
+                if (bleAdvProxyEnabled) {
                     session.send(
-                        EspHomeMessageType.LIST_ENTITIES_SERVICES_RESPONSE,
-                        EspHomeProtoCodec.encodeListEntitiesServicesResponse(
-                            name = service.name,
-                            key = service.key,
-                            args = service.args,
+                        EspHomeMessageType.LIST_ENTITIES_TEXT_SENSOR_RESPONSE,
+                        EspHomeProtoCodec.encodeListEntitiesTextSensorResponse(
+                            objectId = ADAPTER_NAME_OBJECT_ID,
+                            key = ADAPTER_NAME_KEY,
+                            name = ADAPTER_NAME_OBJECT_ID,
                         ),
                     )
+                    for (service in BLE_ADV_SERVICES) {
+                        session.send(
+                            EspHomeMessageType.LIST_ENTITIES_SERVICES_RESPONSE,
+                            EspHomeProtoCodec.encodeListEntitiesServicesResponse(
+                                name = service.name,
+                                key = service.key,
+                                args = service.args,
+                            ),
+                        )
+                    }
                 }
                 session.send(EspHomeMessageType.LIST_ENTITIES_DONE_RESPONSE, EMPTY_PAYLOAD)
                 true
@@ -545,10 +551,12 @@ class EspHomeApiServer(
                 if (!EspHomeProtoCodec.canParse(frame.payload)) {
                     return false
                 }
-                session.send(
-                    EspHomeMessageType.TEXT_SENSOR_STATE_RESPONSE,
-                    EspHomeProtoCodec.encodeTextSensorStateResponse(ADAPTER_NAME_KEY, settings.nodeName),
-                )
+                if (bleAdvProxyEnabled) {
+                    session.send(
+                        EspHomeMessageType.TEXT_SENSOR_STATE_RESPONSE,
+                        EspHomeProtoCodec.encodeTextSensorStateResponse(ADAPTER_NAME_KEY, settings.nodeName),
+                    )
+                }
                 true
             }
 
@@ -563,7 +571,11 @@ class EspHomeApiServer(
 
             EspHomeMessageType.EXECUTE_SERVICE_REQUEST -> {
                 val request = EspHomeProtoCodec.parseExecuteServiceRequest(frame.payload) ?: return false
-                handleExecuteService(request)
+                if (bleAdvProxyEnabled) {
+                    handleExecuteService(request)
+                } else {
+                    log("Ignoring ExecuteServiceRequest (key=${request.key}); ble_adv proxy is disabled")
+                }
                 true
             }
 
@@ -714,6 +726,7 @@ class EspHomeApiServer(
      * so we never touch the network from the main thread (NetworkOnMainThreadException).
      */
     private fun handleBleAdvRawRecv(advertisement: RawAdvertisement) {
+        if (!bleAdvProxyEnabled) return
         if (!bleAdvProxyManager.setupDone) return
         val hasHomeassistantServicesSubscriber = synchronized(clientsLock) {
             clients.any { it.subscribedHomeassistantServices }

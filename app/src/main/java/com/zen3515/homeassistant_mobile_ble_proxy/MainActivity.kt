@@ -1173,6 +1173,33 @@ private fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        Text("BLE advertisement proxy (ble_adv)")
+                        Switch(
+                            checked = draftSettings.bleAdvProxyEnabled,
+                            onCheckedChange = { enabled ->
+                                onDraftSettingsChange(
+                                    draftSettings.copy(bleAdvProxyEnabled = enabled),
+                                )
+                            },
+                        )
+                    }
+                    Text(
+                        text = if (draftSettings.bleAdvProxyEnabled) {
+                            "Exposes the ble_adv services and an adapter-name sensor to Home Assistant, " +
+                                "and forwards raw advertisements as esphome.ble_adv.raw_adv events. " +
+                                "Required by the ha-ble-adv integration for BLE-advertising lights and fans."
+                        } else {
+                            "Off: the proxy exposes no extra services or entities to Home Assistant. " +
+                                "Enable only if you use the ha-ble-adv integration."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Text("Scanner mode")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
