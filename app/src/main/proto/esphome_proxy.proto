@@ -173,3 +173,74 @@ message BluetoothSetConnectionParamsResponse {
   uint64 address = 1;
   int32 error = 2;
 }
+
+message ListEntitiesTextSensorResponse {
+  string object_id = 1;
+  fixed32 key = 2;
+  string name = 3;
+  reserved 4;
+  string icon = 5;
+  bool disabled_by_default = 6;
+  uint32 entity_category = 7;
+}
+
+message TextSensorStateResponse {
+  fixed32 key = 1;
+  string state = 2;
+  bool missing_state = 3;
+}
+
+message SubscribeHomeassistantServicesRequest {}
+
+message HomeassistantServiceMap {
+  string key = 1;
+  string value = 2;
+}
+
+// Named HomeassistantActionRequest in newer ESPHome versions; wire layout unchanged.
+message HomeassistantServiceResponse {
+  string service = 1;
+  repeated HomeassistantServiceMap data = 2;
+  repeated HomeassistantServiceMap data_template = 3;
+  repeated HomeassistantServiceMap variables = 4;
+  bool is_event = 5;
+}
+
+enum ServiceArgType {
+  SERVICE_ARG_TYPE_BOOL = 0;
+  SERVICE_ARG_TYPE_INT = 1;
+  SERVICE_ARG_TYPE_FLOAT = 2;
+  SERVICE_ARG_TYPE_STRING = 3;
+  SERVICE_ARG_TYPE_BOOL_ARRAY = 4;
+  SERVICE_ARG_TYPE_INT_ARRAY = 5;
+  SERVICE_ARG_TYPE_FLOAT_ARRAY = 6;
+  SERVICE_ARG_TYPE_STRING_ARRAY = 7;
+}
+
+message ListEntitiesServicesArgument {
+  string name = 1;
+  ServiceArgType type = 2;
+}
+
+message ListEntitiesServicesResponse {
+  string name = 1;
+  fixed32 key = 2;
+  repeated ListEntitiesServicesArgument args = 3;
+}
+
+message ExecuteServiceArgument {
+  bool bool_ = 1;
+  int32 legacy_int = 2;
+  float float_ = 3;
+  string string_ = 4;
+  sint32 int_ = 5;
+  repeated bool bool_array = 6;
+  repeated sint32 int_array = 7;
+  repeated float float_array = 8;
+  repeated string string_array = 9;
+}
+
+message ExecuteServiceRequest {
+  fixed32 key = 1;
+  repeated ExecuteServiceArgument args = 2;
+}

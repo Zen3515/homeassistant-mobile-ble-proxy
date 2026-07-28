@@ -10,6 +10,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.Closeable
@@ -38,6 +40,14 @@ class EspHomeApiServer(
     private val closed = AtomicBoolean(false)
     private var acceptJob: Job? = null
     private var advertisementFlushJob: Job? = null
+    private var bleAdvEventJob: Job? = null
+
+    // Raw advertisements awaiting ble_adv processing, handed off the main thread. Bounded so a
+    // burst of advertising traffic cannot grow unboundedly; oldest is dropped under pressure.
+    private val bleAdvEvents = Channel<Pair<Long, ByteArray>>(
+        capacity = BLE_ADV_EVENT_QUEUE_CAPACITY,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
     private var serverSocket: ServerSocket? = null
 
     private val clientsLock = Any()
@@ -52,6 +62,23 @@ class EspHomeApiServer(
     private val discoveryThrottleLock = Any()
     private val discoveryThrottleStateByAddress = HashMap<Long, DiscoveryThrottleState>()
     private val immediateFlushScheduled = AtomicBoolean(false)
+
+    private val bleAdvertiseManager = BleAdvertiseManager(
+        context = context,
+        onError = onError,
+        onLog = { message -> log("ble_adv: $message") },
+        onPauseScanning = { scannerEngine.stop() },
+        onResumeScanning = {
+            val hasSubscribers = synchronized(clientsLock) { clients.any { it.subscribedAdvertisements } }
+            if (!closed.get() && hasSubscribers) {
+                scannerEngine.start(configuredScannerMode)
+            }
+        },
+    )
+
+    private val bleAdvProxyManager = BleAdvProxyManager(
+        onLog = { message -> log("ble_adv: $message") },
+    )
 
     private val gattManager = BluetoothGattProxyManager(
         context = context,
@@ -125,6 +152,11 @@ class EspHomeApiServer(
                 flushPendingAdvertisements()
             }
         }
+        bleAdvEventJob = scope.launch {
+            for ((address, data) in bleAdvEvents) {
+                processBleAdvRawRecv(address, data)
+            }
+        }
 
         val filterSummary = if (compiledAdvertisementFilters.isEmpty()) {
             "allow-all"
@@ -144,10 +176,13 @@ class EspHomeApiServer(
         log("API server stopping")
         acceptJob?.cancel()
         advertisementFlushJob?.cancel()
+        bleAdvEventJob?.cancel()
+        bleAdvEvents.close()
         val socket = serverSocket
         serverSocket = null
         acceptJob = null
         advertisementFlushJob = null
+        bleAdvEventJob = null
         scope.cancel()
         runCatching { socket?.close() }
         resetAdvertisementRuntimeState()
@@ -160,12 +195,14 @@ class EspHomeApiServer(
 
         sessions.forEach { it.closeQuietly() }
         gattManager.stop()
+        bleAdvertiseManager.shutdown()
         ProxyRuntimeState.setClientCount(0)
         log("API server stopped")
     }
 
     fun publishAdvertisement(advertisement: RawAdvertisement) {
         if (closed.get()) return
+        handleBleAdvRawRecv(advertisement)
         lastAdvertisementReceivedAtMs = SystemClock.elapsedRealtime()
         receivedAdvertisements += 1
         if (receivedAdvertisements == 1L || receivedAdvertisements % 1000L == 0L) {
@@ -482,13 +519,54 @@ class EspHomeApiServer(
                 if (!EspHomeProtoCodec.canParse(frame.payload)) {
                     return false
                 }
+                session.send(
+                    EspHomeMessageType.LIST_ENTITIES_TEXT_SENSOR_RESPONSE,
+                    EspHomeProtoCodec.encodeListEntitiesTextSensorResponse(
+                        objectId = ADAPTER_NAME_OBJECT_ID,
+                        key = ADAPTER_NAME_KEY,
+                        name = ADAPTER_NAME_OBJECT_ID,
+                    ),
+                )
+                for (service in BLE_ADV_SERVICES) {
+                    session.send(
+                        EspHomeMessageType.LIST_ENTITIES_SERVICES_RESPONSE,
+                        EspHomeProtoCodec.encodeListEntitiesServicesResponse(
+                            name = service.name,
+                            key = service.key,
+                            args = service.args,
+                        ),
+                    )
+                }
                 session.send(EspHomeMessageType.LIST_ENTITIES_DONE_RESPONSE, EMPTY_PAYLOAD)
                 true
             }
 
-            EspHomeMessageType.SUBSCRIBE_STATES_REQUEST -> EspHomeProtoCodec.canParse(frame.payload)
+            EspHomeMessageType.SUBSCRIBE_STATES_REQUEST -> {
+                if (!EspHomeProtoCodec.canParse(frame.payload)) {
+                    return false
+                }
+                session.send(
+                    EspHomeMessageType.TEXT_SENSOR_STATE_RESPONSE,
+                    EspHomeProtoCodec.encodeTextSensorStateResponse(ADAPTER_NAME_KEY, settings.nodeName),
+                )
+                true
+            }
 
-            34, // SubscribeHomeassistantServicesRequest
+            EspHomeMessageType.SUBSCRIBE_HOMEASSISTANT_SERVICES_REQUEST -> {
+                if (!EspHomeProtoCodec.canParse(frame.payload)) {
+                    return false
+                }
+                session.subscribedHomeassistantServices = true
+                log("Client ${session.remoteAddress} subscribed Home Assistant services")
+                true
+            }
+
+            EspHomeMessageType.EXECUTE_SERVICE_REQUEST -> {
+                val request = EspHomeProtoCodec.parseExecuteServiceRequest(frame.payload) ?: return false
+                handleExecuteService(request)
+                true
+            }
+
             38, // SubscribeHomeAssistantStatesRequest
             -> EspHomeProtoCodec.canParse(frame.payload)
 
@@ -597,6 +675,65 @@ class EspHomeApiServer(
 
             else -> true
         }
+    }
+
+    private fun handleExecuteService(request: EspHomeProtoCodec.ExecuteServiceRequestMsg) {
+        when (request.key) {
+            SERVICE_SETUP_KEY -> {
+                val ignDuration = request.args.getOrNull(0)?.float ?: 0f
+                val ignoredCids = request.args.getOrNull(1)?.floatArray ?: emptyList()
+                val ignoredMacs = request.args.getOrNull(2)?.stringArray ?: emptyList()
+                bleAdvProxyManager.handleSetup(ignDuration, ignoredCids, ignoredMacs)
+            }
+
+            SERVICE_ADV_V0_KEY -> {
+                val raw = request.args.getOrNull(0)?.string ?: return
+                val duration = request.args.getOrNull(1)?.float ?: 0f
+                val perRepeatDuration = duration / REPEAT_NB
+                bleAdvertiseManager.enqueue(raw, perRepeatDuration, REPEAT_NB)
+                bleAdvProxyManager.registerIgnoredAdvertisements(listOf(raw))
+            }
+
+            SERVICE_ADV_V1_KEY -> {
+                val raw = request.args.getOrNull(0)?.string ?: return
+                val duration = request.args.getOrNull(1)?.float ?: 0f
+                val repeat = (request.args.getOrNull(2)?.float ?: 1f).toInt().coerceAtLeast(1)
+                val ignoredAdvs = request.args.getOrNull(3)?.stringArray ?: emptyList()
+                val ignDuration = request.args.getOrNull(4)?.float ?: 0f
+                bleAdvertiseManager.enqueue(raw, duration, repeat)
+                bleAdvProxyManager.registerIgnoredAdvertisements(ignoredAdvs, ignDuration)
+            }
+
+            else -> log("Unknown ExecuteServiceRequest key=${request.key}")
+        }
+    }
+
+    /**
+     * Called on the BLE scanner callback thread, which on Android is the main thread. Only cheap
+     * pre-filtering happens here; dupe matching and the socket write are handed to [bleAdvEvents]
+     * so we never touch the network from the main thread (NetworkOnMainThreadException).
+     */
+    private fun handleBleAdvRawRecv(advertisement: RawAdvertisement) {
+        if (!bleAdvProxyManager.setupDone) return
+        val hasHomeassistantServicesSubscriber = synchronized(clientsLock) {
+            clients.any { it.subscribedHomeassistantServices }
+        }
+        if (!hasHomeassistantServicesSubscriber) return
+
+        bleAdvEvents.trySend(advertisement.address to advertisement.data)
+    }
+
+    private fun processBleAdvRawRecv(address: Long, data: ByteArray) {
+        val macAddress = ProxyIdentity.longToMac(address)
+        val event = bleAdvProxyManager.onRawRecv(macAddress, data) ?: return
+        broadcast(
+            typeId = EspHomeMessageType.HOMEASSISTANT_SERVICE_RESPONSE,
+            payload = EspHomeProtoCodec.encodeHomeassistantServiceResponse(
+                service = BLE_ADV_RAW_EVENT,
+                data = listOf("raw" to event.hex, "orig" to event.mac),
+                isEvent = true,
+            ),
+        ) { it.subscribedHomeassistantServices }
     }
 
     private fun handleGattEvent(event: BluetoothGattProxyManager.Event) {
@@ -1115,6 +1252,7 @@ class EspHomeApiServer(
         val remoteAddress: String,
         @Volatile var subscribedAdvertisements: Boolean = false,
         @Volatile var subscribedConnectionsFree: Boolean = false,
+        @Volatile var subscribedHomeassistantServices: Boolean = false,
     ) : Closeable {
         private val writeLock = Any()
 
@@ -1388,7 +1526,53 @@ class EspHomeApiServer(
         return compiledAdvertisementFilters.any { it.matches(advertisement) }
     }
 
+    private data class ServiceDef(
+        val name: String,
+        val key: Int,
+        val args: List<Pair<String, EspHomeProtoCodec.ServiceArgType>>,
+    )
+
     companion object {
+        private const val ADAPTER_NAME_OBJECT_ID = "ble_adv_proxy_name"
+        private const val ADAPTER_NAME_KEY = 1001
+        private const val SERVICE_SETUP_KEY = 1002
+        private const val SERVICE_ADV_V0_KEY = 1003
+        private const val SERVICE_ADV_V1_KEY = 1004
+        private const val REPEAT_NB = 3
+        private const val BLE_ADV_RAW_EVENT = "esphome.ble_adv.raw_adv"
+
+        private val BLE_ADV_SERVICES = listOf(
+            ServiceDef(
+                name = "setup_svc_v0",
+                key = SERVICE_SETUP_KEY,
+                args = listOf(
+                    "ignored_duration" to EspHomeProtoCodec.ServiceArgType.FLOAT,
+                    "ignored_cids" to EspHomeProtoCodec.ServiceArgType.FLOAT_ARRAY,
+                    "ignored_macs" to EspHomeProtoCodec.ServiceArgType.STRING_ARRAY,
+                ),
+            ),
+            ServiceDef(
+                name = "adv_svc",
+                key = SERVICE_ADV_V0_KEY,
+                args = listOf(
+                    "raw" to EspHomeProtoCodec.ServiceArgType.STRING,
+                    "duration" to EspHomeProtoCodec.ServiceArgType.FLOAT,
+                ),
+            ),
+            ServiceDef(
+                name = "adv_svc_v1",
+                key = SERVICE_ADV_V1_KEY,
+                args = listOf(
+                    "raw" to EspHomeProtoCodec.ServiceArgType.STRING,
+                    "duration" to EspHomeProtoCodec.ServiceArgType.FLOAT,
+                    "repeat" to EspHomeProtoCodec.ServiceArgType.FLOAT,
+                    "ignored_advs" to EspHomeProtoCodec.ServiceArgType.STRING_ARRAY,
+                    "ignored_duration" to EspHomeProtoCodec.ServiceArgType.FLOAT,
+                ),
+            ),
+        )
+
+        private const val BLE_ADV_EVENT_QUEUE_CAPACITY = 512
         private const val MAX_CONNECTION_SLOTS = 5
         private const val ADVERTISEMENT_BATCH_SIZE = 16
         private const val MAX_GATT_SERVICES_PAYLOAD_BYTES = 1_360
@@ -1445,10 +1629,15 @@ class EspHomeApiServer(
                 EspHomeMessageType.DEVICE_INFO_REQUEST -> "DEVICE_INFO_REQUEST(9)"
                 EspHomeMessageType.DEVICE_INFO_RESPONSE -> "DEVICE_INFO_RESPONSE(10)"
                 EspHomeMessageType.LIST_ENTITIES_REQUEST -> "LIST_ENTITIES_REQUEST(11)"
+                EspHomeMessageType.LIST_ENTITIES_TEXT_SENSOR_RESPONSE -> "LIST_ENTITIES_TEXT_SENSOR_RESPONSE(18)"
                 EspHomeMessageType.LIST_ENTITIES_DONE_RESPONSE -> "LIST_ENTITIES_DONE_RESPONSE(19)"
                 EspHomeMessageType.SUBSCRIBE_STATES_REQUEST -> "SUBSCRIBE_STATES_REQUEST(20)"
-                34 -> "SUBSCRIBE_HOMEASSISTANT_SERVICES_REQUEST(34)"
+                EspHomeMessageType.TEXT_SENSOR_STATE_RESPONSE -> "TEXT_SENSOR_STATE_RESPONSE(27)"
+                EspHomeMessageType.SUBSCRIBE_HOMEASSISTANT_SERVICES_REQUEST -> "SUBSCRIBE_HOMEASSISTANT_SERVICES_REQUEST(34)"
+                EspHomeMessageType.HOMEASSISTANT_SERVICE_RESPONSE -> "HOMEASSISTANT_SERVICE_RESPONSE(35)"
                 38 -> "SUBSCRIBE_HOMEASSISTANT_STATES_REQUEST(38)"
+                EspHomeMessageType.LIST_ENTITIES_SERVICES_RESPONSE -> "LIST_ENTITIES_SERVICES_RESPONSE(41)"
+                EspHomeMessageType.EXECUTE_SERVICE_REQUEST -> "EXECUTE_SERVICE_REQUEST(42)"
                 EspHomeMessageType.SUBSCRIBE_BLUETOOTH_LE_ADVERTISEMENTS_REQUEST -> "SUBSCRIBE_BLE_ADVERTISEMENTS_REQUEST(66)"
                 EspHomeMessageType.BLUETOOTH_DEVICE_REQUEST -> "BLUETOOTH_DEVICE_REQUEST(68)"
                 EspHomeMessageType.BLUETOOTH_DEVICE_CONNECTION_RESPONSE -> "BLUETOOTH_DEVICE_CONNECTION_RESPONSE(69)"
