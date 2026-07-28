@@ -1,5 +1,6 @@
 package com.zen3515.homeassistant_mobile_ble_proxy.proxy
 
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -91,6 +92,7 @@ object ProxyRuntimeState {
             return
         }
 
+        Log.i(LOG_TAG, text)
         val timestamp = timestampFormatter().format(Date())
         val line = "$timestamp $text"
         update { current ->
@@ -120,4 +122,5 @@ object ProxyRuntimeState {
     }
 
     private const val MAX_LOG_LINES = 5_000
+    private const val LOG_TAG = "BleProxy"
 }
