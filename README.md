@@ -14,6 +14,9 @@ It is designed for Home Assistant users who want to run BLE proxying on an Andro
 - Supports plaintext or Noise-encrypted ESPHome API transport.
 - Forwards BLE advertisements to Home Assistant.
 - Supports BLE GATT connections through the ESPHome Bluetooth proxy API.
+- Optionally acts as a raw BLE-advertisement send/receive proxy (`ble_adv`) for Home Assistant's
+  `ha-ble-adv` integration, for devices like FanLamp Pro / LampSmart Pro fans and lights that are
+  controlled purely by broadcasting advertising packets. See [`docs/BLE_ADV.md`](docs/BLE_ADV.md).
 - Supports pair, unpair, and clear-cache requests through Android BLE APIs.
 - Publishes `_esphomelib._tcp.local` mDNS/NSD advertisements.
 - Lets you choose which network transport mDNS should use: `auto`, `wifi`, `cellular`, `vpn`, or `disabled`.
@@ -110,6 +113,9 @@ There is no Home Assistant URL or Home Assistant API token in the normal flow. H
 - `Verbose GATT packet logs`:
   Keeps normal GATT state logs enabled while optionally adding per-packet notify data lines to the runtime log.
   Default is `off` because it gets noisy quickly.
+
+- `BLE advertisement proxy (ble_adv)`:
+  Opt-in, off by default. Exposes the `ble_adv` ESPHome user services and an adapter-name sensor, and forwards raw advertisements as `esphome.ble_adv.raw_adv` events. Required only if you use Home Assistant's `ha-ble-adv` integration to control BLE-advertising-only devices (e.g. FanLamp Pro / LampSmart Pro fans and lights). See [`docs/BLE_ADV.md`](docs/BLE_ADV.md) for how the command and event flow works.
 
 - `mDNS advertise interface`:
   Controls which transport NSD/mDNS registration should prefer.
@@ -208,6 +214,7 @@ Implemented:
 - BLE advertisement forwarding
 - BLE GATT connect, discover, read, write, descriptor access, and notifications
 - BLE pair, unpair, and clear-cache requests
+- Optional `ble_adv` raw advertisement send/receive proxy for the `ha-ble-adv` integration
 - mDNS interface selection
 - Runtime log viewer and copy support
 - Managed Target Devices configuration for lock-screen scanning and immediate auto-pairing
