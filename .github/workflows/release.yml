@@ -28,9 +28,9 @@ jobs:
             exit 1
           fi
 
-          year="${BASH_REMATCH[1]}"
-          minor="${BASH_REMATCH[2]}"
-          patch="${BASH_REMATCH[3]}"
+          year=$((10#${BASH_REMATCH[1]}))
+          minor=$((10#${BASH_REMATCH[2]}))
+          patch=$((10#${BASH_REMATCH[3]}))
 
           if (( minor > 99 || patch > 99 )); then
             echo "Minor and patch must be between 0 and 99" >&2
