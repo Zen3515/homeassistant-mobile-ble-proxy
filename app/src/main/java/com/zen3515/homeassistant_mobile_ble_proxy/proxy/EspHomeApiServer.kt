@@ -601,23 +601,23 @@ class EspHomeApiServer(
 
     private fun handleGattEvent(event: BluetoothGattProxyManager.Event) {
         when (event) {
+            is BluetoothGattProxyManager.Event.DeviceLinkConnected -> {
+                val macAddress = ProxyIdentity.longToMac(event.address)
+                if (autoPairMacsSet.contains(macAddress)) {
+                    log("Auto-pairing triggered for $macAddress upon connection")
+                    scope.launch {
+                        delay(50)
+                        gattManager.createBondIfUnbonded(event.address)
+                    }
+                }
+            }
+
             is BluetoothGattProxyManager.Event.DeviceConnection -> {
                 if (!event.connected) {
                     clearAdvertisementRuntimeStateForAddress(
                         address = event.address,
                         reason = "GATT disconnect",
                     )
-                }
-
-                if (event.connected) {
-                    val macAddress = ProxyIdentity.longToMac(event.address)
-                    if (autoPairMacsSet.contains(macAddress)) {
-                        log("Auto-pairing triggered for $macAddress upon connection")
-                        scope.launch {
-                            delay(50)
-                            gattManager.createBondIfUnbonded(event.address)
-                        }
-                    }
                 }
 
                 broadcast(

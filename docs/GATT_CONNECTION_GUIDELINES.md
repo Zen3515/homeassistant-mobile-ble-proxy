@@ -37,14 +37,14 @@ The final, working solution requires the proxy to act passively regarding Servic
 
 - **MTU remains synchronous:** The proxy requests the required MTU immediately upon the `STATE_CONNECTED` callback. This fulfills Home Assistant's expectation and does not interrupt encryption handshakes.
 - **Queued GATT traffic waits for the initial MTU result:** The proxy may request the MTU immediately, but it should not rush subsequent queued GATT operations ahead of that initial `onMtuChanged(...)` callback or a short timeout fallback. This keeps early CCCD writes and other traffic from racing Android's initial encrypted-link setup.
-- **Service Discovery is un-touched:** The proxy never manually triggers `discoverServices()` for an auto-pairing event. It trusts Home Assistant's API to prompt it when ready.
+- **Auto-pairing adds no extra Service Discovery:** The auto-pair path never starts an additional `discoverServices()` sweep. A no-cache ESPHome connection still performs its one protocol-required discovery before it is reported ready; cached connections continue to skip that discovery.
 - **Safe Bonding Interception (`createBondIfUnbonded`):** The Auto-Pair interceptor in `EspHomeApiServer` now explicitly calls a restricted helper:
     1. It checks if the `BluetoothDevice` is currently `BOND_NONE`.
     2. If true, it calls `device.createBond()`. This naturally spawns the Android OS PIN/Pairing dialog while pausing standard GATT traffic, securing the link gracefully.
     3. If false (already bonded), it cleanly returns and *does nothing*. 
 
 ## Guidelines for Future Contributors
-1. **Never trigger `discoverServices()` proactively on behalf of Home Assistant.** Let the ESPHome API orchestrate when services should be discovered to prevent fatal Android queue overlaps on embedded targets.
+1. **Never trigger an extra `discoverServices()` solely for auto-pairing.** Run discovery only when required by an ESPHome no-cache connection, an explicit services request, or the existing post-bond refresh path, and keep all such work in the serialized GATT queue.
 2. **Never artificially delay the MTU Request if the connection state is marked as connected.**
 3. **Do not let queued GATT operations outrun the initial MTU negotiation.** Start the MTU request immediately, then release the normal GATT queue after the MTU callback or a short timeout.
 4. **Handle Bonding via `createBondIfUnbonded(address)`**. Do not use standard GATT interceptors to manage Android's bond state during active proxy sessions, as it creates race conditions.

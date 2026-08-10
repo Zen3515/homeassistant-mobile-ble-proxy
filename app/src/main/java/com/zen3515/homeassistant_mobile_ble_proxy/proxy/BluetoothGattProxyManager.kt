@@ -34,6 +34,10 @@ class BluetoothGattProxyManager(
         UnsupportedBluetoothConnectionParamsController,
 ) {
     sealed interface Event {
+        data class DeviceLinkConnected(
+            val address: Long,
+        ) : Event
+
         data class DeviceConnection(
             val address: Long,
             val connected: Boolean,
@@ -180,11 +184,14 @@ class BluetoothGattProxyManager(
         val address: Long,
         val macAddress: String,
         val gatt: BluetoothGatt,
-        var serviceCachePolicy: ServiceCachePolicy,
+        val serviceCachePolicy: ServiceCachePolicy,
         var state: ConnectionState,
         var mtu: Int,
         val disconnectWatchdog: DisconnectWatchdog,
     ) {
+        val readyGate = GattConnectionReadyGate(
+            requiresFreshServices = serviceCachePolicy == ServiceCachePolicy.FORCE_DISCOVERY,
+        )
         var connectTimeout: Runnable? = null
         var mtuNegotiationPending: Boolean = false
         var mtuNegotiationTimeout: Runnable? = null
@@ -1019,6 +1026,14 @@ class BluetoothGattProxyManager(
             emit(Event.DevicePairing(address = connection.address, paired = false, error = error))
             logInfo("GATT pair follow-up discovery failed for ${connection.macAddress}: error=$error")
         }
+        if (failedOperation is PendingOperation.DiscoverServices && connection.readyGate.isWaitingForFreshServices) {
+            logInfo(
+                "GATT no-cache connection setup failed for ${connection.macAddress} " +
+                    "during service discovery: error=$error",
+            )
+            closeConnection(connection, error)
+            return
+        }
         emit(Event.GattError(connection.address, handle, error))
         if (connection.rediscoverServicesWhenIdle && connection.pendingOperations.none { it is PendingOperation.DiscoverServices }) {
             connection.rediscoverServicesWhenIdle = false
@@ -1072,9 +1087,14 @@ class BluetoothGattProxyManager(
 
         val existing = connections[address]
         if (existing != null) {
-            existing.serviceCachePolicy = serviceCachePolicy
             if (existing.state == ConnectionState.CONNECTED) {
-                emit(Event.DeviceConnection(address = address, connected = true, mtu = existing.mtu, error = 0))
+                if (existing.readyGate.isReady) {
+                    emitConnectionReady(existing)
+                } else {
+                    logInfo(
+                        "GATT connect request for ${existing.macAddress} arrived while fresh service discovery is pending",
+                    )
+                }
                 return
             }
             logInfo(
@@ -1317,6 +1337,17 @@ class BluetoothGattProxyManager(
         pumpOperationQueue(connection)
     }
 
+    private fun emitConnectionReady(connection: Connection) {
+        emit(
+            Event.DeviceConnection(
+                address = connection.address,
+                connected = true,
+                mtu = connection.mtu,
+                error = 0,
+            )
+        )
+    }
+
     private fun serviceCacheModeLabel(policy: ServiceCachePolicy): String =
         when (policy) {
             ServiceCachePolicy.PREFER_PLATFORM_CACHE -> "prefer-cache"
@@ -1386,14 +1417,27 @@ class BluetoothGattProxyManager(
                         connection.connectTimeout = null
                         connection.state = ConnectionState.CONNECTED
                         logInfo("GATT connected to ${connection.macAddress}; requesting MTU $REQUESTED_MTU")
-                        emit(Event.DeviceConnection(address = connection.address, connected = true, mtu = connection.mtu, error = 0))
+                        emit(Event.DeviceLinkConnected(address = connection.address))
+                        if (connection.readyGate.onLinkConnected()) {
+                            emitConnectionReady(connection)
+                        } else {
+                            logInfo(
+                                "GATT delaying connection-ready response for ${connection.macAddress} " +
+                                    "until fresh service discovery completes",
+                            )
+                        }
                         if (!hasConnectPermission()) {
                             closeConnection(connection, ERROR_PERMISSION_DENIED)
                             return@runOnMain
                         }
                         try {
                             beginInitialMtuNegotiation(connection)
-                            if (!gatt.requestMtu(REQUESTED_MTU)) {
+                            val mtuRequestStarted = gatt.requestMtu(REQUESTED_MTU)
+                            if (connection.readyGate.isWaitingForFreshServices) {
+                                connection.emitServicesAfterDiscovery = false
+                                requestServiceDiscovery(connection, "no-cache connection setup")
+                            }
+                            if (!mtuRequestStarted) {
                                 logInfo("GATT MTU request returned false for ${connection.macAddress}; continuing with default MTU ${connection.mtu}")
                                 completeInitialMtuNegotiation(connection, "requestMtu returned false")
                             }
@@ -1467,6 +1511,13 @@ class BluetoothGattProxyManager(
                     connection.servicesLoaded = true
                     connection.serviceRefreshRequired = false
                     logDiscoveredServices(connection, services, "discoverServices()")
+                    if (connection.readyGate.onFreshServicesDiscovered()) {
+                        logInfo(
+                            "GATT fresh services ready for ${connection.macAddress}; " +
+                                "emitting delayed connection-ready response",
+                        )
+                        emitConnectionReady(connection)
+                    }
                     if (connection.emitPairingSuccessAfterDiscovery) {
                         connection.emitPairingSuccessAfterDiscovery = false
                         emit(Event.DevicePairing(address = address, paired = true, error = 0))
