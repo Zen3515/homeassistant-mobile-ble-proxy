@@ -48,6 +48,7 @@ object ProxySettingsJsonCodec {
             .put("bluetoothMacOverride", settings.bluetoothMacOverride)
             .put("espHomeApiEncryptionKey", settings.espHomeApiEncryptionKey)
             .put("verboseGattNotifyDataLogging", settings.verboseGattNotifyDataLogging)
+            .put("bleAdvProxyEnabled", settings.bleAdvProxyEnabled)
             .put("autoStartOnBoot", settings.autoStartOnBoot)
             .put("scannerMode", settings.scannerMode.name)
             .put("advertisementFlushIntervalMs", settings.advertisementFlushIntervalMs)
@@ -113,6 +114,11 @@ object ProxySettingsJsonCodec {
                 json = json,
                 fieldName = "verboseGattNotifyDataLogging",
                 defaultValue = defaults.verboseGattNotifyDataLogging,
+            ),
+            bleAdvProxyEnabled = readOptionalBoolean(
+                json = json,
+                fieldName = "bleAdvProxyEnabled",
+                defaultValue = defaults.bleAdvProxyEnabled,
             ),
             autoStartOnBoot = readOptionalBoolean(
                 json = json,

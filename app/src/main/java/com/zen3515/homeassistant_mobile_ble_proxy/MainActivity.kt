@@ -1173,6 +1173,41 @@ private fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
+                        Text("BLE advertisement proxy (ble_adv)")
+                        Switch(
+                            checked = draftSettings.bleAdvProxyEnabled,
+                            onCheckedChange = { enabled ->
+                                onDraftSettingsChange(
+                                    draftSettings.copy(bleAdvProxyEnabled = enabled),
+                                )
+                            },
+                        )
+                    }
+                    Text(
+                        text = if (draftSettings.bleAdvProxyEnabled) {
+                            "Exposes the ble_adv services and an adapter-name sensor to Home Assistant, " +
+                                "and forwards raw advertisements as esphome.ble_adv.raw_adv events. " +
+                                "Required by the ha-ble-adv integration for BLE-advertising lights and fans."
+                        } else {
+                            "Off: the proxy exposes no extra services or entities to Home Assistant. " +
+                                "Enable only if you use the ha-ble-adv integration."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        text = "Changing this restarts the proxy, which leaves an already-loaded " +
+                            "ha-ble-adv integration pointing at an adapter that briefly disappeared. " +
+                            "If your devices show as unavailable afterwards, reload it in Home Assistant: " +
+                            "Settings > Devices & Services > BLE ADV > Reload.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Text("Scanner mode")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
@@ -1934,6 +1969,7 @@ private fun requiredPermissions(): Array<String> {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         permissions += Manifest.permission.BLUETOOTH_SCAN
         permissions += Manifest.permission.BLUETOOTH_CONNECT
+        permissions += Manifest.permission.BLUETOOTH_ADVERTISE
     }
     permissions += Manifest.permission.ACCESS_FINE_LOCATION
     if (Build.VERSION.SDK_INT in Build.VERSION_CODES.Q..Build.VERSION_CODES.R) {

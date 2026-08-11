@@ -64,6 +64,13 @@ data class ProxySettings(
     val espHomeApiEncryptionKey: String = "",
     val verboseGattNotifyDataLogging: Boolean = false,
     val autoStartOnBoot: Boolean = false,
+    /**
+     * Opt-in. When enabled the proxy also registers the ble_adv services, publishes the adapter
+     * name sensor, and forwards raw advertisements as esphome.ble_adv.raw_adv events for the
+     * ha-ble-adv integration. Off by default so a plain Bluetooth proxy exposes nothing extra
+     * to Home Assistant.
+     */
+    val bleAdvProxyEnabled: Boolean = false,
     val scannerMode: ScannerMode = ScannerMode.PASSIVE,
     val advertisementFlushIntervalMs: Int = 100,
     val advertisementDedupWindowMs: Int = 10_000,

@@ -21,6 +21,7 @@ class SettingsRepository(private val context: Context) {
         val bluetoothMacOverride = stringPreferencesKey("bluetooth_mac_override")
         val espHomeApiEncryptionKey = stringPreferencesKey("esphome_api_encryption_key")
         val verboseGattNotifyDataLogging = booleanPreferencesKey("verbose_gatt_notify_data_logging")
+        val bleAdvProxyEnabled = booleanPreferencesKey("ble_adv_proxy_enabled")
         val autoStartOnBoot = booleanPreferencesKey("auto_start_on_boot")
         val scannerMode = stringPreferencesKey("scanner_mode")
         val advertisementFlushIntervalMs = intPreferencesKey("advertisement_flush_interval_ms")
@@ -48,6 +49,7 @@ class SettingsRepository(private val context: Context) {
             bluetoothMacOverride = prefs[Keys.bluetoothMacOverride].takeUnless { it.isNullOrBlank() } ?: generatedMac,
             espHomeApiEncryptionKey = prefs[Keys.espHomeApiEncryptionKey] ?: generatedNoisePsk,
             verboseGattNotifyDataLogging = prefs[Keys.verboseGattNotifyDataLogging] ?: ProxySettings().verboseGattNotifyDataLogging,
+            bleAdvProxyEnabled = prefs[Keys.bleAdvProxyEnabled] ?: ProxySettings().bleAdvProxyEnabled,
             autoStartOnBoot = prefs[Keys.autoStartOnBoot] ?: false,
             scannerMode = ScannerMode.entries.firstOrNull {
                 it.name == (prefs[Keys.scannerMode] ?: ScannerMode.PASSIVE.name)
@@ -86,6 +88,7 @@ class SettingsRepository(private val context: Context) {
             prefs[Keys.bluetoothMacOverride] = settings.bluetoothMacOverride
             prefs[Keys.espHomeApiEncryptionKey] = settings.espHomeApiEncryptionKey
             prefs[Keys.verboseGattNotifyDataLogging] = settings.verboseGattNotifyDataLogging
+            prefs[Keys.bleAdvProxyEnabled] = settings.bleAdvProxyEnabled
             prefs[Keys.autoStartOnBoot] = settings.autoStartOnBoot
             prefs[Keys.scannerMode] = settings.scannerMode.name
             prefs[Keys.advertisementFlushIntervalMs] = settings.advertisementFlushIntervalMs

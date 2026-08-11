@@ -110,6 +110,34 @@ object EspHomeProtoCodec {
         val handle: Int,
     )
 
+    enum class ServiceArgType(val protoValue: Int) {
+        BOOL(0),
+        INT(1),
+        FLOAT(2),
+        STRING(3),
+        BOOL_ARRAY(4),
+        INT_ARRAY(5),
+        FLOAT_ARRAY(6),
+        STRING_ARRAY(7),
+    }
+
+    data class ExecuteServiceArgument(
+        val bool: Boolean = false,
+        val legacyInt: Int = 0,
+        val float: Float = 0f,
+        val string: String = "",
+        val int: Int = 0,
+        val boolArray: List<Boolean> = emptyList(),
+        val intArray: List<Int> = emptyList(),
+        val floatArray: List<Float> = emptyList(),
+        val stringArray: List<String> = emptyList(),
+    )
+
+    data class ExecuteServiceRequestMsg(
+        val key: Int,
+        val args: List<ExecuteServiceArgument>,
+    )
+
     data class GattCharacteristic(
         val uuid: UUID,
         val handle: Int,
@@ -351,6 +379,65 @@ object EspHomeProtoCodec {
             address = address,
             handle = handle,
             enable = enable,
+        )
+    }
+
+    fun parseExecuteServiceRequest(payload: ByteArray): ExecuteServiceRequestMsg? {
+        var key = 0
+        var hasKey = false
+        val args = mutableListOf<ExecuteServiceArgument>()
+
+        val ok = parse(payload) { input, fieldNumber, tag ->
+            when (fieldNumber) {
+                1 -> {
+                    key = input.readFixed32()
+                    hasKey = true
+                }
+
+                2 -> args += parseExecuteServiceArgument(input.readByteArray())
+                else -> input.skipField(tag)
+            }
+        }
+
+        return if (ok && hasKey) ExecuteServiceRequestMsg(key, args) else null
+    }
+
+    private fun parseExecuteServiceArgument(payload: ByteArray): ExecuteServiceArgument {
+        var bool = false
+        var legacyInt = 0
+        var float = 0f
+        var string = ""
+        var int = 0
+        val boolArray = mutableListOf<Boolean>()
+        val intArray = mutableListOf<Int>()
+        val floatArray = mutableListOf<Float>()
+        val stringArray = mutableListOf<String>()
+
+        parse(payload) { input, fieldNumber, tag ->
+            when (fieldNumber) {
+                1 -> bool = input.readBool()
+                2 -> legacyInt = input.readInt32()
+                3 -> float = input.readFloat()
+                4 -> string = input.readString()
+                5 -> int = input.readSInt32()
+                6 -> boolArray += input.readBool()
+                7 -> intArray += input.readSInt32()
+                8 -> floatArray += input.readFloat()
+                9 -> stringArray += input.readString()
+                else -> input.skipField(tag)
+            }
+        }
+
+        return ExecuteServiceArgument(
+            bool = bool,
+            legacyInt = legacyInt,
+            float = float,
+            string = string,
+            int = int,
+            boolArray = boolArray,
+            intArray = intArray,
+            floatArray = floatArray,
+            stringArray = stringArray,
         )
     }
 
@@ -598,6 +685,58 @@ object EspHomeProtoCodec {
         }
     }
 
+    fun encodeListEntitiesTextSensorResponse(objectId: String, key: Int, name: String): ByteArray {
+        return encode {
+            writeString(1, objectId)
+            writeFixed32(2, key)
+            writeString(3, name)
+            writeEnum(7, ENTITY_CATEGORY_DIAGNOSTIC)
+        }
+    }
+
+    fun encodeTextSensorStateResponse(key: Int, state: String): ByteArray {
+        return encode {
+            writeFixed32(1, key)
+            writeString(2, state)
+        }
+    }
+
+    fun encodeListEntitiesServicesResponse(
+        name: String,
+        key: Int,
+        args: List<Pair<String, ServiceArgType>>,
+    ): ByteArray {
+        return encode {
+            writeString(1, name)
+            writeFixed32(2, key)
+            for ((argName, argType) in args) {
+                val argPayload = encode {
+                    writeString(1, argName)
+                    writeEnum(2, argType.protoValue)
+                }
+                writeNestedMessage(3, argPayload)
+            }
+        }
+    }
+
+    fun encodeHomeassistantServiceResponse(
+        service: String,
+        data: List<Pair<String, String>>,
+        isEvent: Boolean,
+    ): ByteArray {
+        return encode {
+            writeString(1, service)
+            for ((mapKey, mapValue) in data) {
+                val mapPayload = encode {
+                    writeString(1, mapKey)
+                    writeString(2, mapValue)
+                }
+                writeNestedMessage(2, mapPayload)
+            }
+            writeBool(5, isEvent)
+        }
+    }
+
     private fun RuntimeScannerState.toProtoValue(): Int {
         return when (this) {
             RuntimeScannerState.IDLE -> 0
@@ -615,6 +754,8 @@ object EspHomeProtoCodec {
             ScannerMode.ACTIVE -> 1
         }
     }
+
+    private const val ENTITY_CATEGORY_DIAGNOSTIC = 2
 
     private fun CodedOutputStream.writeNestedMessage(fieldNumber: Int, payload: ByteArray) {
         writeTag(fieldNumber, WireFormat.WIRETYPE_LENGTH_DELIMITED)
