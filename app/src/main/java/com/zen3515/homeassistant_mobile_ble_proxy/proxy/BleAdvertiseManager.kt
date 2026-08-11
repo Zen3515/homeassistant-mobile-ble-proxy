@@ -13,6 +13,7 @@ import android.os.ParcelUuid
 import androidx.core.content.ContextCompat
 import java.util.ArrayDeque
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -20,6 +21,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Broadcasts raw BLE advertising payloads, mirroring the send loop in NicoIIT/esphome-ble_adv_proxy
@@ -32,7 +35,7 @@ import kotlinx.coroutines.launch
  * service UUIDs), which is byte-compatible for the Manufacturer-Specific-Data-framed payloads
  * ble_adv devices use, but is not guaranteed to be a byte-for-byte reproduction of the input.
  */
-class BleAdvertiseManager(
+internal class BleAdvertiseManager(
     private val context: Context,
     private val onError: (String) -> Unit = {},
     private val onLog: (String) -> Unit = {},
@@ -41,8 +44,8 @@ class BleAdvertiseManager(
      * competes with advertising for radio time, and on shared Wi-Fi/BT antennas it can starve
      * advertising badly enough that nothing reaches the target device.
      */
-    private val onPauseScanning: () -> Unit = {},
-    private val onResumeScanning: () -> Unit = {},
+    private val onPauseScanning: (() -> BluetoothScanPauseToken)? = null,
+    private val onResumeScanning: (BluetoothScanPauseToken) -> Boolean = { false },
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val bluetoothManager: BluetoothManager? = context.getSystemService(BluetoothManager::class.java)
@@ -110,25 +113,38 @@ class BleAdvertiseManager(
     }
 
     private suspend fun pump() {
-        var scanningPaused = false
+        var scanPauseToken: BluetoothScanPauseToken? = null
         try {
             while (!shutdown) {
                 val packet = synchronized(queueLock) { queue.pollFirst() } ?: break
-                if (!scanningPaused) {
-                    scanningPaused = true
-                    onLog("Pausing BLE scan for advertising burst")
-                    runCatching { onPauseScanning() }
-                        .onFailure { onError("Failed to pause scan for advertising: ${it.message}") }
-                    // Give the controller a moment to actually tear the scan down.
-                    delay(SCAN_TEARDOWN_SETTLE_MS)
+                if (scanPauseToken == null) {
+                    scanPauseToken = onPauseScanning?.let { pause ->
+                        runCatching { pause() }
+                            .onFailure { onError("Failed to pause scan for advertising: ${it.message}") }
+                            .getOrNull()
+                    }
+                    if (scanPauseToken?.wasRunning == true) {
+                        onLog("Paused BLE scan for advertising burst")
+                        // Give the controller a moment to actually tear the scan down.
+                        delay(SCAN_TEARDOWN_SETTLE_MS)
+                    }
                 }
                 sendPacketAndWait(packet)
             }
         } finally {
-            if (scanningPaused) {
-                runCatching { onResumeScanning() }
+            val token = scanPauseToken
+            if (token?.wasRunning == true) {
+                val resumed = runCatching { onResumeScanning(token) }
                     .onFailure { onError("Failed to resume scan after advertising: ${it.message}") }
-                onLog("Resumed BLE scan after advertising burst")
+                    .getOrDefault(false)
+                if (resumed) {
+                    onLog(
+                        "Restored BLE scan after advertising burst " +
+                            "(profile=${token.profile.name.lowercase()}, mode=${token.mode.name.lowercase()})",
+                    )
+                } else {
+                    onLog("BLE scan was not restored because it is no longer requested")
+                }
             }
         }
     }
@@ -162,13 +178,17 @@ class BleAdvertiseManager(
 
         val started = startAdvertisingBlocking(advertiser, settings, data)
         if (started) {
-            val framing = if (connectable) "uuid16/ADV_IND" else "mfr-data/ADV_NONCONN_IND"
-            onLog(
-                "Advertising raw adv for ${packet.durationMs}ms " +
-                    "($framing): ${formatHex(packet.payload)}",
-            )
-            delay(packet.durationMs.toLong())
-            stopAdvertisingQuietly()
+            try {
+                val framing = if (connectable) "uuid16/ADV_IND" else "mfr-data/ADV_NONCONN_IND"
+                onLog(
+                    "Advertising raw adv for ${packet.durationMs}ms " +
+                        "($framing): ${formatHex(packet.payload)}",
+                )
+                delay(packet.durationMs.toLong())
+            } finally {
+                // A cancelled pump must never leave Android advertising indefinitely.
+                stopAdvertisingQuietly()
+            }
         }
     }
 
@@ -177,36 +197,80 @@ class BleAdvertiseManager(
         settings: AdvertiseSettings,
         data: AdvertiseData,
     ): Boolean {
-        return kotlinx.coroutines.suspendCancellableCoroutine { cont ->
-            val callback = object : AdvertiseCallback() {
-                override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                    activeCallback = this
-                    if (cont.isActive) cont.resumeWith(Result.success(true))
-                }
+        val started = withTimeoutOrNull(ADVERTISE_START_TIMEOUT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                val cancelled = AtomicBoolean(false)
+                val callbackCompleted = AtomicBoolean(false)
+                val callback = object : AdvertiseCallback() {
+                    override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+                        if (!callbackCompleted.compareAndSet(false, true)) {
+                            stopAdvertisingCallback(advertiser, this)
+                            return
+                        }
+                        synchronized(advertisingLock) {
+                            if (!cancelled.get() && !shutdown) {
+                                activeAdvertisement = ActiveAdvertisement(advertiser, this)
+                            }
+                        }
+                        if (cancelled.get() || shutdown) {
+                            stopAdvertisingCallback(advertiser, this)
+                        }
+                        continuation.resumeWith(Result.success(true))
+                    }
 
-                override fun onStartFailure(errorCode: Int) {
-                    onError("Failed to start raw adv broadcast (code=$errorCode)")
-                    if (cont.isActive) cont.resumeWith(Result.success(false))
+                    override fun onStartFailure(errorCode: Int) {
+                        if (!callbackCompleted.compareAndSet(false, true)) return
+                        onError("Failed to start raw adv broadcast (code=$errorCode)")
+                        continuation.resumeWith(Result.success(false))
+                    }
                 }
-            }
-            runCatching {
-                advertiser.startAdvertising(settings, data, callback)
-            }.onFailure {
-                onError("startAdvertising threw: ${it.message}")
-                if (cont.isActive) cont.resumeWith(Result.success(false))
+                continuation.invokeOnCancellation {
+                    cancelled.set(true)
+                    stopAdvertisingCallback(advertiser, callback)
+                }
+                runCatching {
+                    advertiser.startAdvertising(settings, data, callback)
+                }.onFailure {
+                    if (!callbackCompleted.compareAndSet(false, true)) return@onFailure
+                    onError("startAdvertising threw: ${it.message}")
+                    continuation.resumeWith(Result.success(false))
+                }
             }
         }
+        if (started == null) {
+            onError("Timed out starting raw adv broadcast after ${ADVERTISE_START_TIMEOUT_MS}ms")
+            return false
+        }
+        return started
     }
 
-    @Volatile
-    private var activeCallback: AdvertiseCallback? = null
+    private data class ActiveAdvertisement(
+        val advertiser: BluetoothLeAdvertiser,
+        val callback: AdvertiseCallback,
+    )
+
+    private val advertisingLock = Any()
+    private var activeAdvertisement: ActiveAdvertisement? = null
 
     private fun stopAdvertisingQuietly() {
-        val advertiser = leAdvertiser() ?: return
-        val callback = activeCallback ?: return
-        activeCallback = null
+        val active = synchronized(advertisingLock) {
+            activeAdvertisement.also { activeAdvertisement = null }
+        } ?: return
+        stopAdvertisingCallback(active.advertiser, active.callback)
+    }
+
+    private fun stopAdvertisingCallback(
+        advertiser: BluetoothLeAdvertiser,
+        callback: AdvertiseCallback,
+    ) {
+        synchronized(advertisingLock) {
+            if (activeAdvertisement?.callback === callback) {
+                activeAdvertisement = null
+            }
+        }
         if (!hasAdvertisePermission()) return
         runCatching { advertiser.stopAdvertising(callback) }
+            .onFailure { onError("stopAdvertising threw: ${it.message}") }
     }
 
     private fun leAdvertiser(): BluetoothLeAdvertiser? {
@@ -229,6 +293,7 @@ class BleAdvertiseManager(
         /** ADVERTISE_MODE_LOW_LATENCY, the fastest interval Android exposes. */
         private const val ADVERTISE_INTERVAL_MS = 100
         private const val SCAN_TEARDOWN_SETTLE_MS = 120L
+        private const val ADVERTISE_START_TIMEOUT_MS = 5_000L
 
         /** 13 16-bit service UUIDs, matching the vendor app's framing. */
         private const val SERVICE_UUID_PAYLOAD_BYTES = 26

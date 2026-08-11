@@ -164,6 +164,37 @@ class BluetoothScanEngine(
 
     fun currentProfile(): ScanProfile = activeProfile ?: configuredProfile
 
+    /**
+     * Temporarily stops scanning for a ble_adv transmit burst and captures the complete state
+     * needed to restore the same scan session afterwards.
+     */
+    @Synchronized
+    internal fun pauseForAdvertising(): BluetoothScanPauseToken {
+        val token = BluetoothScanPauseToken(
+            wasRunning = running,
+            // Capture the profile actually on air. A targeted profile can fall back to broad,
+            // and resuming the configured value could otherwise change scanner behavior.
+            profile = activeProfile ?: configuredProfile,
+            mode = currentMode,
+        )
+        if (token.wasRunning) {
+            stop()
+        }
+        return token
+    }
+
+    /** Restores only a scanner that was running before [pauseForAdvertising]. */
+    @Synchronized
+    internal fun resumeAfterAdvertising(token: BluetoothScanPauseToken): Boolean {
+        if (shutdown || !token.wasRunning) return false
+        if (running) return true
+        return startInternal(
+            profile = token.profile,
+            mode = token.mode,
+            fromRetry = false,
+        )
+    }
+
     private fun setActiveProfile(profile: ScanProfile?) {
         activeProfile = profile
         onProfileChanged(profile)

@@ -1,6 +1,7 @@
 package com.zen3515.homeassistant_mobile_ble_proxy.proxy
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,6 +17,7 @@ class ProxySettingsJsonCodecTest {
             bluetoothMacOverride = "AA:BB:CC:DD:EE:FF",
             espHomeApiEncryptionKey = validNoiseKey,
             verboseGattNotifyDataLogging = true,
+            bleAdvProxyEnabled = true,
             autoStartOnBoot = true,
             scannerMode = ScannerMode.ACTIVE,
             advertisementFlushIntervalMs = 250,
@@ -50,6 +52,23 @@ class ProxySettingsJsonCodecTest {
         val decoded = ProxySettingsJsonCodec.fromJson(encoded)
 
         assertEquals(settings, decoded)
+    }
+
+    @Test
+    fun `ble adv defaults off when importing configuration without the field`() {
+        val json = """
+            {
+              "schemaVersion": 1,
+              "settings": {
+                "nodeName": "legacy_proxy"
+              }
+            }
+        """.trimIndent()
+
+        val decoded = ProxySettingsJsonCodec.fromJson(json)
+
+        assertFalse(ProxySettings().bleAdvProxyEnabled)
+        assertFalse(decoded.bleAdvProxyEnabled)
     }
 
     @Test

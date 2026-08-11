@@ -1,6 +1,5 @@
 package com.zen3515.homeassistant_mobile_ble_proxy
 
-import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -81,6 +80,7 @@ import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyRuntimeSnapshot
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxyRuntimeState
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxySettings
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ProxySettingsJsonCodec
+import com.zen3515.homeassistant_mobile_ble_proxy.proxy.RuntimePermissionPolicy
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.RuntimeScannerState
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ScanProfile
 import com.zen3515.homeassistant_mobile_ble_proxy.proxy.ScannerMode
@@ -309,7 +309,10 @@ private fun ProxyScreen(
                 onAutoStartOnBootChange = onAutoStartOnBootChange,
                 batteryOptimizationIgnored = isBatteryOptimizationIgnored(context),
                 onRequestPermissions = {
-                    val missing = missingRuntimePermissions(context)
+                    val missing = missingRuntimePermissions(
+                        context = context,
+                        bleAdvProxyEnabled = uiState.settings.bleAdvProxyEnabled,
+                    )
                     if (missing.isEmpty()) {
                         Toast.makeText(context, "BLE and notification permissions are already granted.", Toast.LENGTH_SHORT)
                             .show()
@@ -1187,15 +1190,17 @@ private fun SettingsScreen(
                         text = if (draftSettings.bleAdvProxyEnabled) {
                             "Exposes the ble_adv services and an adapter-name sensor to Home Assistant, " +
                                 "and forwards raw advertisements as esphome.ble_adv.raw_adv events. " +
-                                "Required by the ha-ble-adv integration for BLE-advertising lights and fans."
+                                "Required by the ha-ble-adv integration for BLE-advertising lights and fans. " +
+                                "Also enables runtime-log mirroring to Android Logcat."
                         } else {
                             "Off: the proxy exposes no extra services or entities to Home Assistant. " +
-                                "Enable only if you use the ha-ble-adv integration."
+                                "It does not request advertising permission, transmit packets, pause scanning, " +
+                                "or mirror runtime logs to Logcat."
                         },
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        text = "Changing this restarts the proxy, which leaves an already-loaded " +
+                        text = "Changing this requires restarting the proxy. This leaves an already-loaded " +
                             "ha-ble-adv integration pointing at an adapter that briefly disappeared. " +
                             "If your devices show as unavailable afterwards, reload it in Home Assistant: " +
                             "Settings > Devices & Services > BLE ADV > Reload.",
@@ -1963,28 +1968,14 @@ private fun AdvertisementFilterRuleCard(
     }
 }
 
-private fun requiredPermissions(): Array<String> {
-    val permissions = mutableSetOf<String>()
-
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        permissions += Manifest.permission.BLUETOOTH_SCAN
-        permissions += Manifest.permission.BLUETOOTH_CONNECT
-        permissions += Manifest.permission.BLUETOOTH_ADVERTISE
-    }
-    permissions += Manifest.permission.ACCESS_FINE_LOCATION
-    if (Build.VERSION.SDK_INT in Build.VERSION_CODES.Q..Build.VERSION_CODES.R) {
-        permissions += Manifest.permission.ACCESS_BACKGROUND_LOCATION
-    }
-
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        permissions += Manifest.permission.POST_NOTIFICATIONS
-    }
-
-    return permissions.toTypedArray()
-}
-
-private fun missingRuntimePermissions(context: Context): List<String> {
-    return requiredPermissions().filter { permission ->
+private fun missingRuntimePermissions(
+    context: Context,
+    bleAdvProxyEnabled: Boolean,
+): List<String> {
+    return RuntimePermissionPolicy.requiredPermissions(
+        sdkInt = Build.VERSION.SDK_INT,
+        bleAdvProxyEnabled = bleAdvProxyEnabled,
+    ).filter { permission ->
         ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED
     }
 }

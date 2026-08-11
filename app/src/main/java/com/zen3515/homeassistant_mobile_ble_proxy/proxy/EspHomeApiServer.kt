@@ -63,24 +63,30 @@ class EspHomeApiServer(
     private val discoveryThrottleStateByAddress = HashMap<Long, DiscoveryThrottleState>()
     private val immediateFlushScheduled = AtomicBoolean(false)
 
-    private val bleAdvProxyEnabled = settings.bleAdvProxyEnabled
-
-    private val bleAdvertiseManager = BleAdvertiseManager(
-        context = context,
-        onError = onError,
-        onLog = { message -> log("ble_adv: $message") },
-        onPauseScanning = { scannerEngine.stop() },
-        onResumeScanning = {
-            val hasSubscribers = synchronized(clientsLock) { clients.any { it.subscribedAdvertisements } }
-            if (!closed.get() && hasSubscribers) {
-                scannerEngine.start(configuredScannerMode)
-            }
-        },
-    )
-
-    private val bleAdvProxyManager = BleAdvProxyManager(
-        onLog = { message -> log("ble_adv: $message") },
-    )
+    private val bleAdvFeatureGate = BleAdvFeatureGate(settings.bleAdvProxyEnabled)
+    private val bleAdvRuntime = bleAdvFeatureGate.createRuntime {
+        BleAdvRuntime(
+            advertiser = BleAdvertiseManager(
+                context = context,
+                onError = onError,
+                onLog = { message -> log("ble_adv: $message") },
+                onPauseScanning = { scannerEngine.pauseForAdvertising() },
+                onResumeScanning = { pauseToken ->
+                    val hasSubscribers = synchronized(clientsLock) {
+                        clients.any { it.subscribedAdvertisements }
+                    }
+                    if (!closed.get() && hasSubscribers) {
+                        scannerEngine.resumeAfterAdvertising(pauseToken)
+                    } else {
+                        false
+                    }
+                },
+            ),
+            receiver = BleAdvProxyManager(
+                onLog = { message -> log("ble_adv: $message") },
+            ),
+        )
+    }
 
     private val gattManager = BluetoothGattProxyManager(
         context = context,
@@ -154,7 +160,7 @@ class EspHomeApiServer(
                 flushPendingAdvertisements()
             }
         }
-        if (bleAdvProxyEnabled) {
+        if (bleAdvRuntime != null) {
             bleAdvEventJob = scope.launch {
                 for ((address, data) in bleAdvEvents) {
                     processBleAdvRawRecv(address, data)
@@ -168,7 +174,7 @@ class EspHomeApiServer(
             "${compiledAdvertisementFilters.size} rule(s)"
         }
         log(
-            "API server started (port=${socket.localPort}, encryption=${if (noisePsk != null) "on" else "off"}, filters=$filterSummary, discovery_throttle=${settings.advertisementDiscoveryThrottleIntervalMs}ms, rediscovery=${DISCOVERY_REDISCOVERY_WINDOW_MS}ms, low_rate_checks=${settings.scannerLowRateConsecutiveChecks}, ble_adv=${if (bleAdvProxyEnabled) "on" else "off"})",
+            "API server started (port=${socket.localPort}, encryption=${if (noisePsk != null) "on" else "off"}, filters=$filterSummary, discovery_throttle=${settings.advertisementDiscoveryThrottleIntervalMs}ms, rediscovery=${DISCOVERY_REDISCOVERY_WINDOW_MS}ms, low_rate_checks=${settings.scannerLowRateConsecutiveChecks}, ble_adv=${if (bleAdvRuntime != null) "on" else "off"})",
         )
         return socket.localPort
     }
@@ -199,7 +205,7 @@ class EspHomeApiServer(
 
         sessions.forEach { it.closeQuietly() }
         gattManager.stop()
-        bleAdvertiseManager.shutdown()
+        bleAdvRuntime?.advertiser?.shutdown()
         ProxyRuntimeState.setClientCount(0)
         log("API server stopped")
     }
@@ -523,7 +529,7 @@ class EspHomeApiServer(
                 if (!EspHomeProtoCodec.canParse(frame.payload)) {
                     return false
                 }
-                if (bleAdvProxyEnabled) {
+                if (bleAdvFeatureGate.exposesEntitiesAndServices) {
                     session.send(
                         EspHomeMessageType.LIST_ENTITIES_TEXT_SENSOR_RESPONSE,
                         EspHomeProtoCodec.encodeListEntitiesTextSensorResponse(
@@ -551,7 +557,7 @@ class EspHomeApiServer(
                 if (!EspHomeProtoCodec.canParse(frame.payload)) {
                     return false
                 }
-                if (bleAdvProxyEnabled) {
+                if (bleAdvFeatureGate.exposesEntitiesAndServices) {
                     session.send(
                         EspHomeMessageType.TEXT_SENSOR_STATE_RESPONSE,
                         EspHomeProtoCodec.encodeTextSensorStateResponse(ADAPTER_NAME_KEY, settings.nodeName),
@@ -571,8 +577,9 @@ class EspHomeApiServer(
 
             EspHomeMessageType.EXECUTE_SERVICE_REQUEST -> {
                 val request = EspHomeProtoCodec.parseExecuteServiceRequest(frame.payload) ?: return false
-                if (bleAdvProxyEnabled) {
-                    handleExecuteService(request)
+                val runtime = bleAdvRuntime
+                if (runtime != null) {
+                    handleExecuteService(runtime, request)
                 } else {
                     log("Ignoring ExecuteServiceRequest (key=${request.key}); ble_adv proxy is disabled")
                 }
@@ -689,21 +696,24 @@ class EspHomeApiServer(
         }
     }
 
-    private fun handleExecuteService(request: EspHomeProtoCodec.ExecuteServiceRequestMsg) {
+    private fun handleExecuteService(
+        runtime: BleAdvRuntime,
+        request: EspHomeProtoCodec.ExecuteServiceRequestMsg,
+    ) {
         when (request.key) {
             SERVICE_SETUP_KEY -> {
                 val ignDuration = request.args.getOrNull(0)?.float ?: 0f
                 val ignoredCids = request.args.getOrNull(1)?.floatArray ?: emptyList()
                 val ignoredMacs = request.args.getOrNull(2)?.stringArray ?: emptyList()
-                bleAdvProxyManager.handleSetup(ignDuration, ignoredCids, ignoredMacs)
+                runtime.receiver.handleSetup(ignDuration, ignoredCids, ignoredMacs)
             }
 
             SERVICE_ADV_V0_KEY -> {
                 val raw = request.args.getOrNull(0)?.string ?: return
                 val duration = request.args.getOrNull(1)?.float ?: 0f
                 val perRepeatDuration = duration / REPEAT_NB
-                bleAdvertiseManager.enqueue(raw, perRepeatDuration, REPEAT_NB)
-                bleAdvProxyManager.registerIgnoredAdvertisements(listOf(raw))
+                runtime.advertiser.enqueue(raw, perRepeatDuration, REPEAT_NB)
+                runtime.receiver.registerIgnoredAdvertisements(listOf(raw))
             }
 
             SERVICE_ADV_V1_KEY -> {
@@ -712,8 +722,8 @@ class EspHomeApiServer(
                 val repeat = (request.args.getOrNull(2)?.float ?: 1f).toInt().coerceAtLeast(1)
                 val ignoredAdvs = request.args.getOrNull(3)?.stringArray ?: emptyList()
                 val ignDuration = request.args.getOrNull(4)?.float ?: 0f
-                bleAdvertiseManager.enqueue(raw, duration, repeat)
-                bleAdvProxyManager.registerIgnoredAdvertisements(ignoredAdvs, ignDuration)
+                runtime.advertiser.enqueue(raw, duration, repeat)
+                runtime.receiver.registerIgnoredAdvertisements(ignoredAdvs, ignDuration)
             }
 
             else -> log("Unknown ExecuteServiceRequest key=${request.key}")
@@ -726,8 +736,8 @@ class EspHomeApiServer(
      * so we never touch the network from the main thread (NetworkOnMainThreadException).
      */
     private fun handleBleAdvRawRecv(advertisement: RawAdvertisement) {
-        if (!bleAdvProxyEnabled) return
-        if (!bleAdvProxyManager.setupDone) return
+        val runtime = bleAdvRuntime ?: return
+        if (!runtime.receiver.setupDone) return
         val hasHomeassistantServicesSubscriber = synchronized(clientsLock) {
             clients.any { it.subscribedHomeassistantServices }
         }
@@ -737,8 +747,9 @@ class EspHomeApiServer(
     }
 
     private fun processBleAdvRawRecv(address: Long, data: ByteArray) {
+        val runtime = bleAdvRuntime ?: return
         val macAddress = ProxyIdentity.longToMac(address)
-        val event = bleAdvProxyManager.onRawRecv(macAddress, data) ?: return
+        val event = runtime.receiver.onRawRecv(macAddress, data) ?: return
         broadcast(
             typeId = EspHomeMessageType.HOMEASSISTANT_SERVICE_RESPONSE,
             payload = EspHomeProtoCodec.encodeHomeassistantServiceResponse(
@@ -1543,6 +1554,11 @@ class EspHomeApiServer(
         val name: String,
         val key: Int,
         val args: List<Pair<String, EspHomeProtoCodec.ServiceArgType>>,
+    )
+
+    private data class BleAdvRuntime(
+        val advertiser: BleAdvertiseManager,
+        val receiver: BleAdvProxyManager,
     )
 
     companion object {

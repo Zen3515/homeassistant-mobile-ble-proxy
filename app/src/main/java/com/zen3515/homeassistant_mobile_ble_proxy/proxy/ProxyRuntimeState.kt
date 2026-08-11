@@ -1,13 +1,13 @@
 package com.zen3515.homeassistant_mobile_ble_proxy.proxy
 
 import android.util.Log
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 enum class RuntimeScannerState {
     IDLE,
@@ -33,6 +33,9 @@ data class ProxyRuntimeSnapshot(
 object ProxyRuntimeState {
     private val mutableState = MutableStateFlow(ProxyRuntimeSnapshot())
     val state: StateFlow<ProxyRuntimeSnapshot> = mutableState.asStateFlow()
+
+    @Volatile
+    private var logcatMirroringEnabled = false
 
     fun update(transform: (ProxyRuntimeSnapshot) -> ProxyRuntimeSnapshot) {
         mutableState.update(transform)
@@ -92,7 +95,9 @@ object ProxyRuntimeState {
             return
         }
 
-        Log.i(LOG_TAG, text)
+        if (logcatMirroringEnabled) {
+            Log.i(LOG_TAG, text)
+        }
         val timestamp = timestampFormatter().format(Date())
         val line = "$timestamp $text"
         update { current ->
@@ -103,6 +108,12 @@ object ProxyRuntimeState {
     fun clearLogs() {
         update { it.copy(logLines = emptyList()) }
     }
+
+    fun setLogcatMirroringEnabled(enabled: Boolean) {
+        logcatMirroringEnabled = enabled
+    }
+
+    internal fun isLogcatMirroringEnabled(): Boolean = logcatMirroringEnabled
 
     fun resetCounters() {
         update {

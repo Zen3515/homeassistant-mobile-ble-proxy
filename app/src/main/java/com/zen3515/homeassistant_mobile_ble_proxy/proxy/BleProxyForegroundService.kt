@@ -178,8 +178,9 @@ class BleProxyForegroundService : Service() {
             acquireWakeLockIfNeeded()
             startWakeLockRenewal()
             ProxyRuntimeState.resetCounters()
-            logRuntime("Initializing proxy runtime")
             currentSettings = settingsRepository.settings.first()
+            ProxyRuntimeState.setLogcatMirroringEnabled(currentSettings.bleAdvProxyEnabled)
+            logRuntime("Initializing proxy runtime")
             coroutineContext.ensureActive()
             if (!lifecycleCoordinator.isCurrent(token)) {
                 return
@@ -357,6 +358,7 @@ class BleProxyForegroundService : Service() {
         unregisterScreenReceiver()
         releaseWakeLockIfHeld()
         logRuntime("Proxy stopped")
+        ProxyRuntimeState.setLogcatMirroringEnabled(false)
         CrashDiagnostics.recordLifecycle("service teardown complete")
     }
 
